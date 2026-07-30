@@ -5,3 +5,18 @@
 # React Router
 /.react-router/
 /build/
+
+# Local database
+/data/*
+!/data/.gitkeep
+
+# Desktop build outputs
+/dist/
+/src-tauri/target/
+/src-tauri/binaries/
+/src-tauri/gen/
+/scripts/desktop/assets.generated.ts
+/scripts/desktop/schema.generated.sql
+
+# Local scratch/repro scripts
+/tmp-repro*.ts

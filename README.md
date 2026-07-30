@@ -1,87 +1,104 @@
-# Welcome to React Router!
+# Sprout Account 2000 🌱 — Accounting Adventures™
 
-A modern, production-ready template for building full-stack React applications using React Router.
+A local-only household finance manager wearing its Sunday-best 1999 desktop-software
+chrome: beveled buttons, gradient title bars, a Company Navigator, LCD readouts, and
+a status bar with opinions. Import bank/card statements (CSV or PDF), track
+investment balances, categorize spending into **base / living / luxury** classes,
+and match Amazon orders to card charges — all stored in a local SQLite file, no
+accounts, no cloud.
 
-[![Open in StackBlitz](https://developer.stackblitz.com/img/open_in_stackblitz.svg)](https://stackblitz.com/github/remix-run/react-router-templates/tree/main/default)
+## Setup
 
-## Features
+Requires [Bun](https://bun.sh) — the data layer imports `bun:sqlite`, so a plain
+Node runtime cannot open the database.
 
-- 🚀 Server-side rendering
-- ⚡️ Hot Module Replacement (HMR)
-- 📦 Asset bundling and optimization
-- 🔄 Data loading and mutations
-- 🔒 TypeScript by default
-- 🎉 TailwindCSS for styling
-- 📖 [React Router docs](https://reactrouter.com/)
-
-## Getting Started
-
-### Installation
-
-Install the dependencies:
-
-```bash
+```sh
+git clone git@github.com:wayjake/sprout-account.git
+cd sprout-account
 npm install
-```
-
-### Development
-
-Start the development server with HMR:
-
-```bash
+cp .env.example .env    # then add your OpenRouter API key
+npm run db:push        # create/update data/finance.db
+npm run seed           # starter categories
 npm run dev
 ```
 
-Your application will be available at `http://localhost:5173`.
+`.env`:
 
-## Building for Production
+| Variable | Purpose |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Enables PDF extraction, CSV mapping suggestions, and AI categorization |
+| `OPENROUTER_MODEL` | Model for categorization + CSV column mapping (default `openai/gpt-4o-mini`) |
+| `OPENROUTER_MODEL_PDF` | Model for PDF statement extraction (default `google/gemini-2.5-flash`) |
+| `DATABASE_PATH` | SQLite file location (default `./data/finance.db`) |
 
-Create a production build:
+Without an API key everything still works except PDF import; CSV mapping falls
+back to a header-name heuristic and categorization uses merchant memory only.
 
-```bash
-npm run build
+## How it works
+
+- **Accounts** (Settings) are either *transaction* accounts (checking, savings,
+  credit cards — import individual transactions) or *balance* accounts
+  (investment/retirement — import balance snapshots).
+- **Import** stages everything for review before committing. CSVs get a saved
+  per-account column mapping (AI-suggested the first time, reused afterwards);
+  PDFs are extracted by the AI. Re-imports and overlapping statements are
+  detected by a per-account dedupe hash and pre-excluded; same-date/same-amount
+  rows with drifted descriptions are flagged as *possible duplicates* for you to
+  decide. Commits are atomic.
+- **Categorization** is three layers: your manual choices are remembered per
+  merchant (merchant memory), repeat merchants auto-categorize free at import
+  time, and the *AI categorize* button (Transactions page) sends only the
+  still-unknown ones to OpenRouter. Your corrections always outrank AI memory.
+- **Spending classes**: every category is *base* (mortgage, utilities —
+  the fixed foundation), *living* (groceries, gas — day-to-day needs),
+  *luxury* (restaurants, shopping — discretionary), *income*, or *transfer*
+  (income/transfer stay out of spending reports). The dashboard contrasts the
+  three spend classes per month.
+- **Amazon (the Endless Bazaar)**: request your order history export (Amazon →
+  Account → Request Your Data → Your Orders), upload the CSV, and the matcher pairs
+  orders with card charges — exact matches, split shipments (one order, several
+  charges), and combined charges (several orders, one charge). Ambiguous cases go
+  to a review list. On a matched transaction you can categorize individual items
+  and *apply items as splits* (tax/shipping pro-rated to the cent).
+- **Backups (the Time Vault)**: one-click snapshots of the SQLite file into
+  `data/backups/` (named `timestamp__label.db`), restore any of them (your current
+  data is auto-stashed as `pre-restore` first), load external `.db` files, and a
+  type-to-confirm **Clear database** that starts you fresh with starter categories
+  (auto-stashed as `pre-reset`).
+
+## Desktop app (macOS arm64)
+
+```sh
+npm run desktop:build
+# → src-tauri/target/release/bundle/macos/Sprout Account 2000.app (+ .dmg)
 ```
 
-## Deployment
+Three stages: the web app is built, compiled into a single Bun executable
+(server + embedded assets + schema bootstrap), then wrapped by **Tauri** as a
+sidecar inside a **frameless native window** — the retro green titlebar IS the
+window frame: drag it to move, double-click to zoom, and the –/□/✕ buttons
+drive real minimize/maximize/quit. The teal "desktop" backdrop only appears in
+a browser; the desktop app fills the window edge-to-edge.
 
-### Docker Deployment
+The desktop app keeps its own ledger in
+`~/Library/Application Support/Sprout Account/` — separate from this repo's dev
+database. Requires the Rust toolchain (`rustup`) for building. The standalone
+server binary also lands at `dist/sprout-account` (`SPROUT_PORT`,
+`SPROUT_DB_PATH`, `SPROUT_NO_WINDOW=1` env knobs).
 
-To build and run using Docker:
+**Note:** the app runs on Bun everywhere (`bun:sqlite` under Drizzle) — use
+`bun run dev` / the npm scripts as written; a plain Node runtime can no longer
+open the database layer. `drizzle-kit` still uses its own driver, so
+`npm run db:push` works as before.
 
-```bash
-docker build -t my-app .
+## Useful commands
 
-# Run the container
-docker run -p 3000:3000 my-app
+```sh
+npm run db:push          # sync schema changes to the SQLite file
+npm run db:studio        # browse the database
+npm run seed             # idempotent starter categories
+npm run seed -- --fake 12000   # + fake data for testing
+npm run typecheck
 ```
 
-The containerized application can be deployed to any platform that supports Docker, including:
-
-- AWS ECS
-- Google Cloud Run
-- Azure Container Apps
-- Digital Ocean App Platform
-- Fly.io
-- Railway
-
-### DIY Deployment
-
-If you're familiar with deploying Node applications, the built-in app server is production-ready.
-
-Make sure to deploy the output of `npm run build`
-
-```
-├── package.json
-├── package-lock.json (or pnpm-lock.yaml, or bun.lockb)
-├── build/
-│   ├── client/    # Static assets
-│   └── server/    # Server-side code
-```
-
-## Styling
-
-This template comes with [Tailwind CSS](https://tailwindcss.com/) already configured for a simple default starting experience. You can use whatever CSS framework you prefer.
-
----
-
-Built with ❤️ using React Router.
+To start over: delete `data/finance.db*`, then `npm run db:push && npm run seed`.

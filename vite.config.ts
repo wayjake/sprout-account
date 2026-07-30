@@ -7,4 +7,11 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
+  // bun:sqlite is a Bun builtin — never bundle or pre-transform it
+  ssr: {
+    external: ["bun:sqlite"],
+  },
+  optimizeDeps: {
+    exclude: ["bun:sqlite"],
+  },
 });
