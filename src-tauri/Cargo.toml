@@ -1,7 +1,7 @@
 [package]
 name = "sprout-account"
 version = "1.0.0"
-description = "Sprout Account 2000 — Accounting Adventures"
+description = "Sprout Account — Household Ledger"
 edition = "2021"
 
 [build-dependencies]

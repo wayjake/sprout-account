@@ -16,7 +16,7 @@ import { formatDateRange } from "~/lib/dates";
 import type { Route } from "./+types/import-session";
 
 export function meta() {
-  return [{ title: "Inspect the Haul · Sprout Account 2000" }];
+  return [{ title: "Review Import · Sprout Account — Household Ledger" }];
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -262,11 +262,11 @@ export default function ImportSession({ loaderData, actionData }: Route.Componen
           ← Import
         </Link>
         <h1 className="mt-1 text-[16px] font-bold text-primary-950">
-          🔍 Inspect the Haul — {active.length} file{active.length === 1 ? "" : "s"}
+          🔍 Review import — {active.length} file{active.length === 1 ? "" : "s"}
         </h1>
         <p className="text-sm text-gray-500">
           {allCommitted
-            ? "This haul is in the books."
+            ? "This import is in the books."
             : `${totals.txns} transactions and ${totals.balances} balance${
                 totals.balances === 1 ? "" : "s"
               } ready to commit${
@@ -318,10 +318,10 @@ export default function ImportSession({ loaderData, actionData }: Route.Componen
       )}
 
       <Card>
-        <CardHeader title="Files in this haul" />
+        <CardHeader title="Files in this import" />
         {active.length === 0 ? (
           <div className="p-4">
-            <EmptyState title="Every file in this haul was discarded" />
+            <EmptyState title="Every file in this import was discarded" />
           </div>
         ) : (
           <ul className="divide-y divide-primary-100 bg-ledger">
@@ -474,13 +474,13 @@ export default function ImportSession({ loaderData, actionData }: Route.Componen
           title={
             allCommitted
               ? "⚖️ Reconciliation"
-              : "⚖️ Reconciliation — if you commit this haul"
+              : "⚖️ Reconciliation — if you commit this import"
           }
         />
         <div className="bg-ledger p-3">
           <ReconcilePanel
             results={reconciliation}
-            emptyMessage="No known balances for these accounts yet, so there is nothing to check the transactions against. Import a statement that carries a closing balance, or set one by hand in the Counting House."
+            emptyMessage="No known balances for these accounts yet, so there is nothing to check the transactions against. Import a statement that carries a closing balance, or set one by hand on the Account Balances page."
           />
         </div>
       </Card>
@@ -490,7 +490,7 @@ export default function ImportSession({ loaderData, actionData }: Route.Componen
           <Form method="post">
             <input type="hidden" name="intent" value="discard-all" />
             <Button variant="danger" type="submit">
-              Discard whole haul
+              Discard whole import
             </Button>
           </Form>
           <Form method="post">
@@ -515,7 +515,7 @@ export default function ImportSession({ loaderData, actionData }: Route.Componen
             View transactions →
           </Link>
           <Link to="/balances" className="font-medium text-primary-600 hover:underline">
-            Counting House →
+            Account Balances →
           </Link>
           <Link to="/import" className="font-medium text-primary-600 hover:underline">
             Import more

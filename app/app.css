@@ -127,12 +127,97 @@ body {
   justify-content: center;
 }
 
+/* ————— Menu bar and its drop-downs ————— */
+
 .menu-item {
   padding: 2px 7px;
 }
 .menu-item:hover {
   background: #1d5434;
   color: #fff;
+}
+
+/* An open menu keeps its title highlighted, like every menu bar ever. */
+.menu-title[data-open="true"] {
+  background: #1d5434;
+  color: #fff;
+}
+
+.menu-popup {
+  background: var(--color-chrome);
+  box-shadow:
+    inset -1px -1px #0a0a0a,
+    inset 1px 1px #ffffff,
+    inset -2px -2px #808080,
+    inset 2px 2px #efece6,
+    3px 3px 0 rgba(0, 0, 0, 0.35);
+}
+
+.menu-row {
+  display: block;
+  width: 100%;
+  padding: 3px 20px 3px 10px;
+  text-align: left;
+  white-space: nowrap;
+  color: #000;
+}
+.menu-row:hover:not([aria-disabled="true"]),
+.menu-row:focus:not([aria-disabled="true"]) {
+  background: #1d5434;
+  color: #fff;
+  outline: none;
+}
+/* Focus still has to be visible on the greyed-out items. */
+.menu-row:focus-visible {
+  outline: 1px dotted currentColor;
+  outline-offset: -3px;
+}
+.menu-row-off {
+  color: var(--color-chrome-dark);
+  text-shadow: 1px 1px 0 #fff;
+  cursor: default;
+}
+
+.menu-sep {
+  margin: 3px 2px;
+  border-top: 1px solid #808080;
+  border-bottom: 1px solid #ffffff;
+}
+
+/* ————— Modal panes (native <dialog>, retro paint) ————— */
+
+.pane-dialog {
+  /* Tailwind's preflight zeroes the UA `margin: auto`, which is what centres a
+     modal dialog in the top layer. Put it back. */
+  margin: auto;
+  max-width: 100vw;
+  max-height: 100vh;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+}
+/* Opening a pane moves focus to its title; keep that legible on the green bar
+   without the browser's default ring fighting the chrome. */
+.pane-dialog h2:focus-visible {
+  outline: 1px dotted #fff;
+  outline-offset: 3px;
+}
+.pane-dialog::backdrop {
+  background: rgba(11, 38, 24, 0.55);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pane-dialog[open] {
+    animation: pane-in 90ms ease-out;
+  }
+}
+@keyframes pane-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 /* Folder-tab (for anything tabbed) */

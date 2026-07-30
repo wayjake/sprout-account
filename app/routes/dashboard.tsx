@@ -17,7 +17,7 @@ import { formatCentsAbs } from "~/lib/money";
 import type { Route } from "./+types/dashboard";
 
 export function meta() {
-  return [{ title: "Adventure Map · Sprout Account 2000" }];
+  return [{ title: "Dashboard · Sprout Account — Household Ledger" }];
 }
 
 const RANGE_OPTIONS = [3, 6, 12, 24] as const;
@@ -82,36 +82,41 @@ export async function loader({ request }: Route.LoaderArgs) {
   };
 }
 
-/** Chevron-ribbon quest step for the adventure map. */
-function QuestStep({
+/**
+ * Chevron-ribbon step in the accounting workflow ribbon. The steps sit in a
+ * grid, so every one is the same width and height — the padding leaves room for
+ * the notch the clip path bites out of each side.
+ */
+function WorkflowStep({
   to,
   icon,
   title,
   blurb,
-  first = false,
 }: {
   to: string;
   icon: string;
   title: string;
   blurb: string;
-  first?: boolean;
 }) {
   return (
     <Link
       to={to}
-      className="group relative flex min-w-36 flex-1 items-center gap-2 bg-primary-100 px-5 py-2.5 hover:bg-primary-200"
+      className="group flex min-h-[60px] items-center gap-3 bg-primary-100 py-2.5 pl-[26px] pr-6 hover:bg-primary-200"
       style={{
-        clipPath: first
-          ? "polygon(0 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 0 100%)"
-          : "polygon(0 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 0 100%, 14px 50%)",
+        clipPath:
+          "polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%, 12px 50%)",
       }}
     >
-      <span className="text-xl" aria-hidden>
+      <span className="w-5 shrink-0 text-center text-lg leading-none" aria-hidden>
         {icon}
       </span>
-      <span>
-        <span className="block text-[11px] font-bold text-primary-900">{title}</span>
-        <span className="block text-[10px] leading-tight text-gray-600">{blurb}</span>
+      <span className="min-w-0">
+        <span className="block text-[11px] font-bold leading-tight text-primary-900">
+          {title}
+        </span>
+        <span className="mt-[2px] block text-[10px] leading-tight text-gray-600">
+          {blurb}
+        </span>
       </span>
     </Link>
   );
@@ -128,13 +133,14 @@ function LcdTile({
   color?: string;
 }) {
   return (
-    <div className="bevel-out p-[3px]">
-      <p className="px-1 pb-[2px] text-[10px] font-bold uppercase tracking-wide text-gray-700">
+    <div className="bevel-out flex h-full flex-col p-[3px]">
+      <p className="px-1 pb-[3px] text-[10px] font-bold uppercase leading-[1.2] tracking-wide text-gray-700">
         {label}
       </p>
-      <div className="bevel-in bg-[#101810] px-2 py-1.5 text-right">
+      {/* mt-auto: readouts line up across the row even when a label wraps */}
+      <div className="bevel-in mt-auto bg-[#101810] px-2 py-1.5 text-right">
         <span
-          className="font-mono text-[16px] font-bold tabular-nums"
+          className="block truncate font-mono text-[15px] font-bold tabular-nums"
           style={{ color, textShadow: `0 0 6px ${color}55` }}
         >
           {value}
@@ -153,65 +159,64 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
 
   return (
     <div className="space-y-4">
-      {/* Adventure map quest line */}
+      {/* Accounting workflow ribbon */}
       <Card>
-        <CardHeader title="🗺️ Your Accounting Adventure — choose your quest" />
-        <div className="flex flex-wrap gap-[2px] bg-ledger p-3">
-          <QuestStep
-            first
+        <CardHeader title="🗺️ Accounting Workflow" />
+        <div className="grid gap-[3px] bg-ledger p-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          <WorkflowStep
             to="/import"
             icon="📥"
-            title="The Receiving Dock"
-            blurb="Haul in fresh statements"
+            title="Import Statements"
+            blurb="Bring in new statements"
           />
-          <QuestStep
+          <WorkflowStep
             to="/transactions?category=none"
             icon="🏷️"
-            title="The Sorting Room"
-            blurb="Tame unsorted coins"
+            title="Categorize Transactions"
+            blurb="Clear the uncategorized"
           />
-          <QuestStep
+          <WorkflowStep
             to="/balances"
             icon="🏦"
-            title="The Counting House"
-            blurb="Weigh every purse"
+            title="Review Balances"
+            blurb="Check every account"
           />
-          <QuestStep
+          <WorkflowStep
             to="/transfers"
             icon="⛴️"
-            title="The Ferry Docks"
-            blurb="Pair gold moved between purses"
+            title="Match Transfers"
+            blurb="Pair money moved between accounts"
           />
-          <QuestStep
+          <WorkflowStep
             to="/amazon"
             icon="📦"
-            title="The Endless Bazaar"
-            blurb="Match mystery parcels"
+            title="Match Amazon Orders"
+            blurb="Tie orders to card charges"
           />
-          <QuestStep
+          <WorkflowStep
             to="/transactions"
             icon="📒"
-            title="The Great Ledger"
+            title="Review Transactions"
             blurb="Inspect every entry"
           />
-          <QuestStep
+          <WorkflowStep
             to="/backups"
             icon="💾"
-            title="The Time Vault"
-            blurb="Preserve your saga"
+            title="Back Up Data"
+            blurb="Save a snapshot"
           />
         </div>
       </Card>
 
-      {/* This month's tale */}
+      {/* This month's summary */}
       <Card>
-        <CardHeader title={`📜 The Tale of ${formatMonth(currentMonth)}`}>
+        <CardHeader title={`📜 ${formatMonth(currentMonth)} Summary`}>
           <Form method="get">
             <select
               name="months"
               defaultValue={monthsBack}
               onChange={(e) => e.currentTarget.form?.requestSubmit()}
-              className={`${selectClass} py-[1px] text-[11px]`}
+              className={`${selectClass} py-0 text-[11px] leading-tight`}
             >
               {RANGE_OPTIONS.map((n) => (
                 <option key={n} value={n}>
@@ -221,17 +226,25 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
             </select>
           </Form>
         </CardHeader>
-        <div className="grid grid-cols-2 gap-2 bg-ledger p-3 md:grid-cols-6">
-          <LcdTile label="Gold spent" value={formatCentsAbs(summary.spend)} color="#ffd24a" />
-          <LcdTile label="Gold earned" value={formatCentsAbs(summary.income)} />
+        <div className="grid grid-cols-2 gap-2 bg-ledger p-3 sm:grid-cols-3 2xl:grid-cols-6">
+          <LcdTile label="Expenses" value={formatCentsAbs(summary.spend)} color="#ffd24a" />
+          <LcdTile label="Income" value={formatCentsAbs(summary.income)} />
           <LcdTile
-            label="Net haul"
+            label="Net cash flow"
             value={`${summary.net < 0 ? "−" : "+"}${formatCentsAbs(summary.net)}`}
             color={summary.net < 0 ? "#ff6a5c" : "#5cff8a"}
           />
-          <LcdTile label="Base (keep)" value={formatCentsAbs(summary.base)} />
-          <LcdTile label="Living (needs)" value={formatCentsAbs(summary.living)} color="#ffd24a" />
-          <LcdTile label="Luxury (wants)" value={formatCentsAbs(summary.luxury)} color="#ff9a5c" />
+          <LcdTile label="Fixed expenses" value={formatCentsAbs(summary.base)} />
+          <LcdTile
+            label="Essential expenses"
+            value={formatCentsAbs(summary.living)}
+            color="#ffd24a"
+          />
+          <LcdTile
+            label="Discretionary expenses"
+            value={formatCentsAbs(summary.luxury)}
+            color="#ff9a5c"
+          />
         </div>
       </Card>
 
@@ -242,11 +255,11 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
             <SpendStackChart data={chartData} />
           ) : (
             <EmptyState
-              title="This chapter is still blank"
-              detail="Import a statement and sort some coins to chart the household saga."
+              title="Nothing to chart yet"
+              detail="Import a statement and categorize a few transactions to see spending by month."
             >
               <Link to="/import" className="bevel-btn px-3 py-1 text-[11px] font-bold">
-                📥 To the Receiving Dock
+                📥 Import statements
               </Link>
             </EmptyState>
           )}
@@ -255,10 +268,10 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card>
-          <CardHeader title="🏆 Where the gold goes" />
+          <CardHeader title="🏆 Top spending categories" />
           {top.length === 0 ? (
             <div className="bg-ledger p-3">
-              <EmptyState title="No spoils recorded yet" />
+              <EmptyState title="No spending recorded yet" />
             </div>
           ) : (
             <ul className="space-y-2 bg-ledger p-3">
@@ -293,12 +306,12 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
         </Card>
 
         <Card>
-          <CardHeader title="💎 Treasure hoards over time" />
+          <CardHeader title="💎 Savings goals over time" />
           <div className="bg-ledger p-3">
             {trends.length === 0 ? (
               <EmptyState
-                title="No hoards charted"
-                detail="Set a balance in the Counting House, or import a statement that carries one."
+                title="No balances charted yet"
+                detail="Set a balance on the Account Balances page, or import a statement that carries one."
               />
             ) : (
               <TrendLineChart

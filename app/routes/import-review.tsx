@@ -12,7 +12,7 @@ import { formatDate, formatDateRange } from "~/lib/dates";
 import type { Route } from "./+types/import-review";
 
 export function meta() {
-  return [{ title: "Inspect the Haul · Sprout Account 2000" }];
+  return [{ title: "Review Import · Sprout Account — Household Ledger" }];
 }
 
 export async function loader({ params }: Route.LoaderArgs) {
@@ -128,7 +128,7 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   if (intent === "commit") {
     const stats = await commitBatch(batchId);
-    // Part of a multi-file haul? Reconciliation lives on the session page.
+    // Part of a multi-file import? Reconciliation lives on the session page.
     if (batch?.sessionId) return redirect(`/import/session/${batch.sessionId}`);
     return { committed: stats };
   }
@@ -179,7 +179,7 @@ export default function ImportReview({ loaderData }: Route.ComponentProps) {
     return (
       <div className="max-w-2xl space-y-4">
         <h1 className="text-[16px] font-bold text-primary-950">
-          🎉 Haul committed to the ledger!
+          🎉 Import committed to the ledger!
         </h1>
         <Card>
           <div className="p-6 text-sm text-gray-700">
@@ -213,7 +213,7 @@ export default function ImportReview({ loaderData }: Route.ComponentProps) {
                 View transactions →
               </Link>
               <Link to="/balances" className="font-medium text-primary-600 hover:underline">
-                Counting House →
+                Account Balances →
               </Link>
               <Link to="/import" className="font-medium text-primary-600 hover:underline">
                 Import another
@@ -229,9 +229,9 @@ export default function ImportReview({ loaderData }: Route.ComponentProps) {
     <div className="max-w-3xl space-y-4">
       <div>
         <Link to={backTo} className="text-xs font-medium text-primary-600 hover:underline">
-          ← {batch.sessionId ? "Back to the haul" : "Import"}
+          ← {batch.sessionId ? "Back to the import" : "Import"}
         </Link>
-        <h1 className="mt-1 text-[16px] font-bold text-primary-950">🔍 Inspect the Haul</h1>
+        <h1 className="mt-1 text-[16px] font-bold text-primary-950">🔍 Review import</h1>
         <p className="text-sm text-gray-500">
           {batch.filename} → {batch.accountName}
           {batch.periodStart && batch.periodEnd &&
@@ -421,7 +421,7 @@ export default function ImportReview({ loaderData }: Route.ComponentProps) {
             to={backTo}
             className="bevel-btn px-4 py-[5px] text-[12px] font-bold text-primary-900"
           >
-            Done — back to the haul →
+            Done — back to the import →
           </Link>
         ) : (
           <Form method="post">

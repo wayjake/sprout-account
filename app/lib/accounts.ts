@@ -1,3 +1,29 @@
+import { ACCOUNT_TYPES, type AccountType } from "~/db/schema";
+
+export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
+  checking: "Checking",
+  savings: "Savings",
+  credit_card: "Credit card",
+  investment: "Investment",
+  retirement: "Retirement",
+  other: "Other",
+};
+
+export function isAccountType(value: unknown): value is AccountType {
+  return typeof value === "string" && (ACCOUNT_TYPES as readonly string[]).includes(value);
+}
+
+/**
+ * Investment and retirement accounts are tracked by balance snapshots from
+ * statements; everything else is tracked transaction by transaction. The
+ * account's `kind` is derived from its type, never chosen separately.
+ */
+export function kindForAccountType(accountType: AccountType) {
+  return accountType === "investment" || accountType === "retirement"
+    ? ("balance" as const)
+    : ("transaction" as const);
+}
+
 /** "Chase · Checking ··1234" — the human label for an account, used in
  *  import history where the account is snapshotted rather than joined. */
 export function accountLabel(account: {

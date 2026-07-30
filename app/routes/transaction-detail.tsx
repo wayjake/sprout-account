@@ -28,7 +28,7 @@ import type { Route } from "./+types/transaction-detail";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   return [
-    { title: `${loaderData?.transaction.merchant ?? "Transaction"} · Sprout Account 2000` },
+    { title: `${loaderData?.transaction.merchant ?? "Transaction"} · Sprout Account — Household Ledger` },
   ];
 }
 

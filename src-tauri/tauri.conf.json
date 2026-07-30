@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Sprout Account 2000",
+  "productName": "Sprout Account",
   "version": "1.0.0",
   "identifier": "dev.sprout.account",
   "build": {

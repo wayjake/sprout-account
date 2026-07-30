@@ -15,7 +15,7 @@ import {
 import type { Route } from "./+types/import";
 
 export function meta() {
-  return [{ title: "The Receiving Dock · Sprout Account 2000" }];
+  return [{ title: "Statement Import · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -128,7 +128,7 @@ export default function Import({ loaderData, actionData }: Route.ComponentProps)
   return (
     <div className="max-w-3xl space-y-6">
       <div>
-        <h1 className="text-[16px] font-bold text-primary-950">📥 The Receiving Dock</h1>
+        <h1 className="text-[16px] font-bold text-primary-950">📥 Statement Import</h1>
         <p className="mt-1 text-sm text-gray-500">
           Upload as many files as you like at once — statements and transaction
           exports together. Statements carry their closing balance, so the two are

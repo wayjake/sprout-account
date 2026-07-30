@@ -54,9 +54,9 @@ export function CardHeader({
   children?: React.ReactNode;
 }) {
   return (
-    <div className="titlebar mb-[3px] flex items-center justify-between px-2 py-1">
-      <h2 className="text-[12px] font-bold">{title}</h2>
-      <div className="flex items-center gap-2">
+    <div className="titlebar mb-[3px] flex min-h-[24px] items-center justify-between gap-2 px-2 py-[3px]">
+      <h2 className="truncate text-[12px] font-bold">{title}</h2>
+      <div className="flex shrink-0 items-center gap-2">
         {children}
         <span className="hidden gap-[2px] sm:flex" aria-hidden>
           <span className="titlebar-btn">–</span>

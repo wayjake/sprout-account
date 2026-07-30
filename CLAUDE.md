@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**Sprout Account 2000** — a local-only household finance manager (React Router + SQLite, no accounts, no cloud) dressed in 1999 desktop-software chrome. It imports bank/card statements, categorizes spending into base/living/luxury classes, tracks investment balances, and matches Amazon orders to card charges. It ships both as a dev web app and as a compiled macOS desktop app. See `README.md` for the user-facing feature tour.
+**Sprout Account — Household Ledger** — a local-only household finance manager (React Router + SQLite, no accounts, no cloud) dressed in 1999 desktop-software chrome. It imports bank/card statements, categorizes spending into base/living/luxury classes, tracks investment balances, and matches Amazon orders to card charges. It ships both as a dev web app and as a compiled macOS desktop app. See `README.md` for the user-facing feature tour.
 
 ## Commands
 
@@ -71,5 +71,5 @@ Raw uploads are kept in `data/uploads/batch-<id>` between steps and deleted on c
 - The retro look lives in `app/app.css` as utility classes: `bevel-out`, `bevel-btn`, `bevel-in`, `field-inset`, `groove`, `titlebar`. Compose these rather than inventing new shadow stacks. Colors come from the Tailwind v4 `@theme` block (`--color-class-*`, `--color-chrome`, `--color-ledger`).
 - Spending-class colors are CVD-validated and duplicated deliberately in `app/components/ui.tsx` (badges) and `app/components/charts.tsx` (`CHART_CLASS_COLORS`); keep them in sync.
 - Charts are hand-rolled SVG in `app/components/charts.tsx` — there is no charting library, and adding one would fight the theme.
-- The app has a voice (Company Navigator, status bar with opinions, "The Endless Bazaar"). New screens should match it; `routes/shell.tsx` holds the toolbar labels.
+- UI copy is plain accounting language — accounts, transactions, categories, balances, income, expenses, transfers, backups. The retro *look* stays (Company Navigator, LCD tiles, status bar); the fantasy/adventure vocabulary was removed deliberately, so don't reintroduce quests, gold, hauls, or hoards. `routes/shell.tsx` holds the toolbar labels.
 - Routes are classic loader/action modules with form posts and an `intent` field — no client-side data fetching layer.

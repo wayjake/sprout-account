@@ -16,7 +16,7 @@ import { formatCentsAbs } from "~/lib/money";
 import type { Route } from "./+types/transfers";
 
 export function meta() {
-  return [{ title: "The Ferry Docks · Sprout Account 2000" }];
+  return [{ title: "Transfers · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -113,14 +113,14 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h1 className="text-[16px] font-bold text-primary-950">⛴️ The Ferry Docks</h1>
+          <h1 className="text-[16px] font-bold text-primary-950">⛴️ Transfers</h1>
           <p className="text-[12px] text-gray-600">
-            Gold ferried between your own purses is neither earned nor spent — linked
-            pairs stay out of income and spending entirely.
+            Money moved between your own accounts is neither income nor spending — linked
+            pairs stay out of income and expense reports entirely.
           </p>
         </div>
         <div className="bevel-in bg-ledger px-3 py-1.5 text-[11px]">
-          <span className="font-bold text-gray-800">Ferried this month:</span>{" "}
+          <span className="font-bold text-gray-800">Transfers this month:</span>{" "}
           <span className="font-mono font-bold tabular-nums text-primary-900">
             {formatCentsAbs(monthMovedCents)}
           </span>
@@ -131,26 +131,26 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
       {fetcher.data?.scanned != null && (
         <MessageBar kind={fetcher.data.scanned > 0 ? "success" : "info"}>
           {fetcher.data.scanned > 0
-            ? `Auto-linked ${fetcher.data.scanned} obvious crossing${
+            ? `Auto-matched ${fetcher.data.scanned} obvious transfer${
                 fetcher.data.scanned === 1 ? "" : "s"
               }.`
-            : "No obvious crossings left to auto-link."}
+            : "No obvious transfers left to auto-match."}
         </MessageBar>
       )}
 
       <Card>
-        <CardHeader title={`🧭 Suggested crossings (${suggestions.length})`}>
+        <CardHeader title={`🧭 Suggested transfer matches (${suggestions.length})`}>
           <fetcher.Form method="post">
             <input type="hidden" name="intent" value="scan" />
             <Button type="submit" size="sm" variant="secondary" disabled={busy}>
-              ⚡ Auto-link the obvious ones
+              ⚡ Auto-match obvious transfers
             </Button>
           </fetcher.Form>
         </CardHeader>
         {suggestions.length === 0 ? (
           <div className="bg-ledger">
             <EmptyState
-              title="No crossings await inspection"
+              title="No transfer matches need review"
               detail="Matching amounts moving between two accounts within a few days will show up here."
             />
           </div>
@@ -194,11 +194,11 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
 
       {unmatched.length > 0 && (
         <Card>
-          <CardHeader title={`🦯 One-legged crossings (${unmatched.length})`} />
+          <CardHeader title={`🦯 Unmatched transfer legs (${unmatched.length})`} />
           <div className="bg-ledger">
             <p className="groove m-2 bg-[#fff7dd] px-3 py-1.5 text-[11px] text-gray-700">
               These are categorized as transfers but no opposite leg is linked. That's
-              fine when the far side isn't imported here (a hoard tracked by balance
+              fine when the far side isn't imported here (a savings goal tracked by balance
               only, or an account you don't track) — otherwise import the other
               account's statement and they'll pair up.
             </p>
@@ -234,12 +234,12 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
       )}
 
       <Card>
-        <CardHeader title={`⇄ Linked crossings (latest ${linked.length})`} />
+        <CardHeader title={`⇄ Linked transfers (latest ${linked.length})`} />
         {linked.length === 0 ? (
           <div className="bg-ledger">
             <EmptyState
-              title="No linked crossings yet"
-              detail="Link a suggestion above, or let the import dock auto-link the obvious ones."
+              title="No linked transfers yet"
+              detail="Link a suggestion above, or let statement import auto-match the obvious ones."
             />
           </div>
         ) : (

@@ -11,7 +11,7 @@ import { Button, Card, CardHeader, EmptyState, Field, inputClass } from "~/compo
 import type { Route } from "./+types/backups";
 
 export function meta() {
-  return [{ title: "The Time Vault · Sprout Account 2000" }];
+  return [{ title: "Backups & Restore · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -94,9 +94,9 @@ export default function Backups({ loaderData, actionData }: Route.ComponentProps
   return (
     <div className="max-w-3xl space-y-6">
       <div>
-        <h1 className="text-[16px] font-bold text-primary-950">💾 The Time Vault</h1>
+        <h1 className="text-[16px] font-bold text-primary-950">💾 Backups & Restore</h1>
         <p className="text-[12px] text-gray-600">
-          Snapshots of your saga, kept as plain SQLite files in{" "}
+          Backups of your ledger, kept as plain SQLite files in{" "}
           <code>data/backups/</code> (named <code>timestamp__label.db</code>).
           Restoring swaps the live ledger — and always stashes your current one first.
         </p>

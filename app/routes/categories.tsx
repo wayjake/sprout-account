@@ -16,7 +16,7 @@ import { SPENDING_CLASSES, type SpendingClass } from "~/db/schema";
 import type { Route } from "./+types/categories";
 
 export function meta() {
-  return [{ title: "The Sorting Room · Sprout Account 2000" }];
+  return [{ title: "Categories · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -88,7 +88,7 @@ export default function Categories({ loaderData, actionData }: Route.ComponentPr
   return (
     <div className="max-w-3xl space-y-6">
       <div>
-        <h1 className="text-[16px] font-bold text-primary-950">🏷️ The Sorting Room</h1>
+        <h1 className="text-[16px] font-bold text-primary-950">🏷️ Categories</h1>
         <p className="mt-1 text-sm text-gray-500">
           Every category belongs to a spending class:{" "}
           <span className="font-medium text-class-base">base</span> (the fixed

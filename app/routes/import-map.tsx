@@ -23,7 +23,7 @@ import { Amount, Button, Card, CardHeader, Field, selectClass } from "~/componen
 import type { Route } from "./+types/import-map";
 
 export function meta() {
-  return [{ title: "Decode the Scroll · Sprout Account 2000" }];
+  return [{ title: "Map CSV Columns · Sprout Account — Household Ledger" }];
 }
 
 async function loadBatch(batchId: string) {
@@ -181,7 +181,7 @@ export default function ImportMap({ loaderData, actionData }: Route.ComponentPro
         <Link to="/import" className="text-xs font-medium text-primary-600 hover:underline">
           ← Import
         </Link>
-        <h1 className="mt-1 text-[16px] font-bold text-primary-950">🗝️ Decode the Scroll (map CSV columns)</h1>
+        <h1 className="mt-1 text-[16px] font-bold text-primary-950">🗝️ Map CSV columns</h1>
         <p className="text-sm text-gray-500">
           {filename} → {accountName} · {rowCount} rows ·{" "}
           {suggestionSource === "ai"

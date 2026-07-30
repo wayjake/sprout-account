@@ -49,7 +49,7 @@ fn main() {
 
             let url = format!("http://127.0.0.1:{port}").parse().unwrap();
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("Sprout Account 2000")
+                .title("Sprout Account — Household Ledger")
                 .inner_size(1280.0, 900.0)
                 .min_inner_size(760.0, 520.0)
                 .decorations(false)

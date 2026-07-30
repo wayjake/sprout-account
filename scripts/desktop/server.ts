@@ -106,7 +106,7 @@ function startServer(): { port: number; server: ReturnType<typeof Bun.serve> } {
 
 const { port } = startServer();
 const appUrl = `http://127.0.0.1:${port}`;
-console.log(`Sprout Account 2000 running at ${appUrl}`);
+console.log(`Sprout Account — Household Ledger running at ${appUrl}`);
 console.log(`Ledger file: ${process.env.DATABASE_PATH}`);
 
 // ——— Open the window ———

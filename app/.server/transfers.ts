@@ -294,7 +294,7 @@ export async function linkedTransfers(limit = 30): Promise<TransferSuggestion[]>
   return rows.map(toSuggestion);
 }
 
-/** Total gold moved between own accounts in a date range (outgoing legs). */
+/** Total moved between own accounts in a date range (outgoing legs). */
 export async function transferVolume(fromDate: string, toDate: string): Promise<number> {
   const [row] = await db.all<{ total: number | null }>(sql`
     select sum(-t.amount_cents) as total

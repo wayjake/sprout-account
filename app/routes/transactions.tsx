@@ -32,7 +32,7 @@ import type { loader as shellLoader } from "./shell";
 import type { Route } from "./+types/transactions";
 
 export function meta() {
-  return [{ title: "The Great Ledger · Sprout Account 2000" }];
+  return [{ title: "Transactions · Sprout Account — Household Ledger" }];
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
@@ -102,14 +102,14 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <h1 className="text-[16px] font-bold text-primary-950">
-          📒 The Great Ledger
+          📒 Transactions
         </h1>
         {uncategorizedCount > 0 && (
           <aiFetcher.Form method="post" action="/api/ai/categorize">
             <Button type="submit" disabled={aiBusy} size="sm">
               {aiBusy
-                ? "🔮 Consulting the oracle…"
-                : `🔮 Sort ${uncategorizedCount.toLocaleString()} unsorted coins (AI)`}
+                ? "🔮 Categorizing…"
+                : `🔮 Categorize ${uncategorizedCount.toLocaleString()} Uncategorized Transactions`}
             </Button>
           </aiFetcher.Form>
         )}
@@ -117,12 +117,12 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
 
       {aiFetcher.data?.stats && (
         <MessageBar kind="success">
-          The oracle sorted {aiFetcher.data.stats.fromMemory} coins from memory and{" "}
-          {aiFetcher.data.stats.fromAi} by divination.
+          Categorized {aiFetcher.data.stats.fromMemory} transactions from merchant memory and{" "}
+          {aiFetcher.data.stats.fromAi} with AI.
           {aiFetcher.data.stats.lowConfidence > 0 &&
-            ` ${aiFetcher.data.stats.lowConfidence} remain a mystery (low confidence).`}
+            ` ${aiFetcher.data.stats.lowConfidence} were left uncategorized (low confidence).`}
           {aiFetcher.data.stats.remaining > 0 &&
-            ` ${aiFetcher.data.stats.remaining} still queued — consult again.`}
+            ` ${aiFetcher.data.stats.remaining} still queued — run it again.`}
         </MessageBar>
       )}
       {aiFetcher.data?.error && (
@@ -178,16 +178,16 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
 
       {rows.length === 0 ? (
         <EmptyState
-          title={hasFilters ? "No entries match this incantation" : "The ledger is blank"}
+          title={hasFilters ? "No transactions match these filters" : "No transactions yet"}
           detail={
             hasFilters
               ? "Loosen the filters and search again."
-              : "Every saga starts with a first statement."
+              : "Import a statement to get started."
           }
         >
           {!hasFilters && (
             <Link to="/import" className="bevel-btn px-3 py-1 text-[11px] font-bold">
-              📥 To the Receiving Dock
+              📥 Import statements
             </Link>
           )}
         </EmptyState>
@@ -247,7 +247,7 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
                         </span>
                       )}
                       {r.categorySource === "ai" && (
-                        <span title="Sorted by the oracle (AI)" className="text-[10px]">
+                        <span title="Categorized by AI" className="text-[10px]">
                           🔮
                         </span>
                       )}

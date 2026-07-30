@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { Form, Link, data, useFetcher } from "react-router";
+import { Form, Link, data, useFetcher, useLocation } from "react-router";
 import { desc, eq } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
 import {
@@ -20,11 +20,12 @@ import {
   selectClass,
 } from "~/components/ui";
 import { formatDate, isValidISODate, todayISO } from "~/lib/dates";
+import { paneHref } from "~/lib/panes";
 import { centsToInput, formatCents, parseCentsInput } from "~/lib/money";
 import type { Route } from "./+types/balances";
 
 export function meta() {
-  return [{ title: "The Counting House · Sprout Account 2000" }];
+  return [{ title: "Account Balances · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -147,15 +148,16 @@ function BalanceFigure({
 export default function Balances({ loaderData, actionData }: Route.ComponentProps) {
   const { balances, netWorthCents, unanchoredCount, reconciliation, today } = loaderData;
   const fetcher = useFetcher();
+  const location = useLocation();
   const [expanded, setExpanded] = useState<number | null>(null);
 
   return (
     <div className="max-w-4xl space-y-4">
       <div>
-        <h1 className="text-[16px] font-bold text-primary-950">🏦 The Counting House</h1>
+        <h1 className="text-[16px] font-bold text-primary-950">🏦 Account Balances</h1>
         <p className="text-[12px] text-gray-600">
-          What every purse and hoard actually holds. A balance comes off a statement or
-          is set by hand, and everything recorded since is added to it.
+          What every account actually holds. A balance comes off a statement or is set by
+          hand, and everything recorded since is added to it.
         </p>
       </div>
 
@@ -171,7 +173,7 @@ export default function Balances({ loaderData, actionData }: Route.ComponentProp
       )}
 
       <Card>
-        <CardHeader title="💰 The reckoning" />
+        <CardHeader title="💰 Net worth" />
         <div className="flex items-center justify-between bg-ledger p-4">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wide text-gray-700">
@@ -182,7 +184,7 @@ export default function Balances({ loaderData, actionData }: Route.ComponentProp
               {unanchoredCount > 0 &&
                 ` · ${unanchoredCount} account${
                   unanchoredCount === 1 ? "" : "s"
-                } left out for want of a known balance`}
+                } left out until a balance is known`}
             </p>
           </div>
           <div className="bevel-in bg-[#101810] px-3 py-2 text-right">
@@ -205,10 +207,13 @@ export default function Balances({ loaderData, actionData }: Route.ComponentProp
           <div className="p-4">
             <EmptyState
               title="No accounts yet"
-              detail="Forge a coin purse in the Workshop first."
+              detail="Add an account first."
             >
-              <Link to="/accounts" className="bevel-btn px-3 py-1 text-[11px] font-bold">
-                ⚙️ To the Workshop
+              <Link
+                to={paneHref(location, "accounts")}
+                className="bevel-btn px-3 py-1 text-[11px] font-bold"
+              >
+                ⚙️ Go to Accounts
               </Link>
             </EmptyState>
           </div>

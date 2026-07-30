@@ -8,7 +8,7 @@ import { formatCents } from "~/lib/money";
 import type { Route } from "./+types/amazon";
 
 export function meta() {
-  return [{ title: "The Endless Bazaar · Sprout Account 2000" }];
+  return [{ title: "Amazon Matching · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -161,10 +161,10 @@ export default function Amazon({ loaderData, actionData }: Route.ComponentProps)
   return (
     <div className="max-w-4xl space-y-5">
       <div>
-        <h1 className="text-[16px] font-bold text-primary-950">📦 The Endless Bazaar</h1>
+        <h1 className="text-[16px] font-bold text-primary-950">📦 Amazon Matching</h1>
         <p className="mt-1 text-sm text-gray-500">
           Import your Amazon order history (Account → Request Your Data → Your Orders),
-          and Sprout matches orders to card charges — including split shipments and
+          and Sprout Account matches orders to card charges — including split shipments and
           combined charges. {orderCount > 0 && (
             <>
               <span className="font-medium text-primary-800">{matchedCount}</span> of{" "}
