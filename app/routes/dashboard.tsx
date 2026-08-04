@@ -256,7 +256,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
           ) : (
             <EmptyState
               title="Nothing to chart yet"
-              detail="Import a statement and categorize a few transactions to see spending by month."
+              detail="Import some transactions and categorize a few to see spending by month."
             >
               <Link to="/import" className="bevel-btn px-3 py-1 text-[11px] font-bold">
                 📥 Import statements
@@ -311,7 +311,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
             {trends.length === 0 ? (
               <EmptyState
                 title="No balances charted yet"
-                detail="Set a balance on the Account Balances page, or import a statement that carries one."
+                detail="Set a balance on the Account Balances page, or close a month on Monthly Reconcile."
               />
             ) : (
               <TrendLineChart

@@ -19,6 +19,7 @@ import {
   inputClass,
   selectClass,
 } from "~/components/ui";
+import { ACCOUNT_TYPE_LABELS } from "~/lib/accounts";
 import { formatDate, isValidISODate, todayISO } from "~/lib/dates";
 import { paneHref } from "~/lib/panes";
 import { centsToInput, formatCents, parseCentsInput } from "~/lib/money";
@@ -237,7 +238,7 @@ export default function Balances({ loaderData, actionData }: Route.ComponentProp
                       <span className="font-bold text-primary-900">{b.name}</span>
                       <span className="ml-1.5 text-[11px] text-gray-500">
                         {b.institution}
-                        {b.isLiability && " · card"}
+                        {b.isLiability && ` · ${ACCOUNT_TYPE_LABELS[b.accountType].toLowerCase()}`}
                       </span>
                     </td>
                     <td className="px-3 py-2 text-right">
@@ -357,8 +358,8 @@ export default function Balances({ loaderData, actionData }: Route.ComponentProp
             </Field>
             <div className="col-span-4 flex items-center justify-between">
               <p className="text-[11px] text-gray-500">
-                Enter what you owe on a credit card as a negative number (−1,234.56). Setting
-                a balance for a date that already has one replaces it.
+                Enter what you owe — on a card, loan or mortgage — as a negative number
+                (−1,234.56). Setting a balance for a date that already has one replaces it.
               </p>
               <Button type="submit">Set balance</Button>
             </div>
@@ -371,7 +372,7 @@ export default function Balances({ loaderData, actionData }: Route.ComponentProp
         <div className="bg-ledger p-3">
           <ReconcilePanel
             results={reconciliation}
-            emptyMessage="No known balances yet — set one above, or import a statement that carries its closing balance, and the ledger will start checking itself."
+            emptyMessage="No known balances yet — set one above, or close a month against a statement on Monthly Reconcile, and the ledger will start checking itself."
           />
         </div>
       </Card>

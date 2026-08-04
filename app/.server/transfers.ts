@@ -1,12 +1,14 @@
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "~/.server/db";
+import { paymentCategoryName } from "~/lib/accounts";
 
 /** Max calendar days between the two legs of a transfer. */
 export const TRANSFER_WINDOW_DAYS = 5;
 
 /** Descriptions that read like account-to-account movement, not purchases. */
 const TRANSFER_HINT =
-  /\b(TRANSFER|XFER|PAYMENT|PMT|PYMT|AUTOPAY|EPAY|BILLPAY|BILL PAY|THANK YOU|DIRECTPAY|DIRECT PAY)\b/i;
+  /\b(TRANSFER|XFER|PAYMENT|PMT|PYMT|AUTOPAY|AUTO PAY|EPAY|BILLPAY|BILL PAY|THANK YOU|DIRECTPAY|DIRECT PAY)\b/i;
 
 export function looksLikeTransfer(description: string): boolean {
   return TRANSFER_HINT.test(description);
@@ -68,6 +70,7 @@ async function rawCandidatePairs(): Promise<RawPair[]> {
     join accounts ia on ia.id = i.account_id
     where o.amount_cents < 0
       and o.transfer_peer_id is null and i.transfer_peer_id is null
+      and o.transfer_account_id is null and i.transfer_account_id is null
       and (o.category_id is null or o.category_id in (select id from transfer_cats))
       and (i.category_id is null or i.category_id in (select id from transfer_cats))
       and not exists (
@@ -129,9 +132,9 @@ export async function findCandidatesFor(txnId: number): Promise<TransferSuggesti
 }
 
 /**
- * Pick the category for a linked pair: "Credit Card Payment" when a credit
- * card is involved, else "Transfer"; any transfer-class category as fallback,
- * created if the user deleted them all.
+ * Pick the category for a linked pair: the debt's own payment category when
+ * one side is a card or a loan, else "Transfer"; any transfer-class category
+ * as fallback, created if the user deleted them all.
  */
 async function transferCategoryId(accountA: schema.Account, accountB: schema.Account) {
   const cats = await db
@@ -139,12 +142,14 @@ async function transferCategoryId(accountA: schema.Account, accountB: schema.Acc
     .from(schema.categories)
     .where(eq(schema.categories.spendingClass, "transfer"))
     .orderBy(schema.categories.sortOrder);
-  const wantCc =
-    accountA.accountType === "credit_card" || accountB.accountType === "credit_card";
+  // A card paid from a HELOC is still a card payment, so the card wins when
+  // both sides are debts; other debts share "Loan Payment".
+  const names = [accountA.accountType, accountB.accountType].map(paymentCategoryName);
+  const wanted = names.find((n) => n === "Credit Card Payment") ?? names.find(Boolean);
   const byName = (name: string) =>
     cats.find((c) => !c.isArchived && c.name.toLowerCase() === name.toLowerCase());
   const pick =
-    (wantCc ? byName("Credit Card Payment") : undefined) ??
+    (wanted ? byName(wanted) : undefined) ??
     byName("Transfer") ??
     cats.find((c) => !c.isArchived) ??
     cats[0];
@@ -192,6 +197,109 @@ export async function linkTransferPair(
       .run();
   });
   return null;
+}
+
+/**
+ * Balance-only accounts a transaction can name as its far side. These keep no
+ * ledger of their own, so a transfer into or out of one never has a second row
+ * to pair with — the link points at the account instead.
+ */
+export async function balanceTransferTargets() {
+  return db
+    .select({
+      id: schema.accounts.id,
+      name: schema.accounts.name,
+      institution: schema.accounts.institution,
+      accountType: schema.accounts.accountType,
+    })
+    .from(schema.accounts)
+    .where(
+      and(
+        eq(schema.accounts.kind, "balance"),
+        eq(schema.accounts.isActive, true),
+      ),
+    )
+    .orderBy(schema.accounts.sortOrder, schema.accounts.name);
+}
+
+/**
+ * Record that this transaction's far side is a balance-only account: a
+ * brokerage contribution, a 401k deferral, a mortgage payment. The row gets a
+ * transfer-class category exactly as a linked pair would, so it leaves
+ * income/spend reporting, and `reconcileAccounts` can then tell the target's
+ * contributions apart from its market movement.
+ *
+ * Returns an error string, or null on success.
+ */
+export async function linkTransferToAccount(
+  txnId: number,
+  accountId: number,
+  source: "user" | "auto",
+): Promise<string | null> {
+  const txn = await db.query.transactions.findFirst({
+    where: eq(schema.transactions.id, txnId),
+    with: { account: true },
+  });
+  if (!txn) return "Transaction not found";
+  if (txn.transferPeerId != null)
+    return "This is already linked to an opposite leg — unlink that first";
+
+  const target = await db.query.accounts.findFirst({
+    where: eq(schema.accounts.id, accountId),
+  });
+  if (!target) return "Account not found";
+  if (target.id === txn.accountId)
+    return "That is the account this transaction is already in";
+  if (target.kind !== "balance")
+    return `${target.name} keeps its own transactions — link the two legs instead`;
+
+  const categoryId = await transferCategoryId(txn.account, target);
+  await db
+    .update(schema.transactions)
+    .set({ transferAccountId: target.id, categoryId, categorySource: source })
+    .where(eq(schema.transactions.id, txnId));
+  return null;
+}
+
+/** Undo an account link. The category is left alone, as with pair unlinking. */
+export async function unlinkTransferAccount(txnId: number) {
+  await db
+    .update(schema.transactions)
+    .set({ transferAccountId: null })
+    .where(eq(schema.transactions.id, txnId));
+}
+
+export interface AccountLinkedTransfer extends TransferLeg {
+  targetAccountId: number;
+  targetAccountName: string;
+}
+
+/** Legs whose far side is a balance-only account, newest first. */
+export async function accountLinkedTransfers(
+  limit = 30,
+): Promise<AccountLinkedTransfer[]> {
+  // Two different accounts per row — the one holding the transaction and the
+  // one it points at — so the far side needs its own alias.
+  const target = alias(schema.accounts, "target_account");
+  return db
+    .select({
+      id: schema.transactions.id,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      description: schema.transactions.description,
+      accountId: schema.transactions.accountId,
+      accountName: schema.accounts.name,
+      targetAccountId: target.id,
+      targetAccountName: target.name,
+    })
+    .from(schema.transactions)
+    .innerJoin(
+      schema.accounts,
+      eq(schema.accounts.id, schema.transactions.accountId),
+    )
+    .innerJoin(target, eq(target.id, schema.transactions.transferAccountId))
+    .orderBy(desc(schema.transactions.date), desc(schema.transactions.id))
+    .limit(limit);
 }
 
 /** Undo a pair link. Categories are left alone. Returns the peer id, if any. */
@@ -261,7 +369,8 @@ export async function unmatchedTransferLegs(limit = 50): Promise<TransferLeg[]> 
     from transactions t
     join accounts a on a.id = t.account_id
     join categories c on c.id = t.category_id
-    where c.spending_class = 'transfer' and t.transfer_peer_id is null
+    where c.spending_class = 'transfer'
+      and t.transfer_peer_id is null and t.transfer_account_id is null
     order by t.date desc, t.id desc
     limit ${limit}
   `);
@@ -294,12 +403,16 @@ export async function linkedTransfers(limit = 30): Promise<TransferSuggestion[]>
   return rows.map(toSuggestion);
 }
 
-/** Total moved between own accounts in a date range (outgoing legs). */
+/**
+ * Total moved between own accounts in a date range (outgoing legs). Counts
+ * both kinds of link: paired legs, and legs pointed at a balance-only account.
+ */
 export async function transferVolume(fromDate: string, toDate: string): Promise<number> {
   const [row] = await db.all<{ total: number | null }>(sql`
     select sum(-t.amount_cents) as total
     from transactions t
-    where t.transfer_peer_id is not null and t.amount_cents < 0
+    where (t.transfer_peer_id is not null or t.transfer_account_id is not null)
+      and t.amount_cents < 0
       and t.date >= ${fromDate} and t.date <= ${toDate}
   `);
   return row?.total ?? 0;

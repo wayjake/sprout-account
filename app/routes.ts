@@ -15,11 +15,18 @@ export default [
       route("transactions", "routes/transactions.tsx"),
       route("transactions/:id", "routes/transaction-detail.tsx"),
       route("transfers", "routes/transfers.tsx"),
+      // Transaction exports (.csv) come in here…
       ...prefix("import", [
         index("routes/import.tsx"),
         route("session/:sessionId", "routes/import-session.tsx"),
+        route("session/:sessionId/categorize", "routes/import-session-categorize.tsx"),
         route(":batchId/map", "routes/import-map.tsx"),
         route(":batchId", "routes/import-review.tsx"),
+      ]),
+      // …and statements (.pdf) are closed against the books here.
+      ...prefix("reconcile", [
+        index("routes/reconcile.tsx"),
+        route(":sessionId", "routes/reconcile-session.tsx"),
       ]),
       route("balances", "routes/balances.tsx"),
       route("categories", "routes/categories.tsx"),

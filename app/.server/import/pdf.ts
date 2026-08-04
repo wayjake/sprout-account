@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { chatJSON, pdfModel } from "~/.server/openrouter";
+import { ACCOUNT_TYPE_LABELS, isLiability } from "~/lib/accounts";
 import { parseCentsString } from "~/lib/money";
 import { addDays } from "~/lib/dates";
 import type { AccountKind, AccountType } from "~/db/schema";
@@ -48,7 +49,8 @@ export async function extractFromPdf(
   account: { kind: AccountKind; accountType: AccountType },
 ): Promise<PdfExtractionResult> {
   const balanceOnly = account.kind === "balance";
-  const isCard = account.accountType === "credit_card";
+  const owed = isLiability(account.accountType);
+  const kindNoun = ACCOUNT_TYPE_LABELS[account.accountType].toLowerCase();
 
   const raw = await chatJSON({
     model: pdfModel(),
@@ -56,13 +58,17 @@ export async function extractFromPdf(
 
 ${
   balanceOnly
-    ? `This is an investment or retirement statement. Extract the account VALUE at each end of the statement period into the balances array — the opening value (kind "opening") and the closing value (kind "closing"). Leave the transactions array empty.`
-    : `This is a ${isCard ? "credit card" : "bank"} statement. Extract TWO things:
+    ? owed
+      ? `This is a ${kindNoun} statement, tracked by balance only. Extract the amount OWED at each end of the statement period into the balances array — the opening balance (kind "opening") and the closing balance (kind "closing"). Use the PRINCIPAL balance outstanding, not the payment due, the escrow balance, or the original loan amount.
+   - IMPORTANT: money owed is NEGATIVE. A principal balance of $312,450.22 must be reported as "-312450.22".
+   - Leave the transactions array empty.`
+      : `This is an investment or retirement statement. Extract the account VALUE at each end of the statement period into the balances array — the opening value (kind "opening") and the closing value (kind "closing"). Leave the transactions array empty.`
+    : `This is a ${owed ? kindNoun : "bank"} statement. Extract TWO things:
 
 1. EVERY transaction, into the transactions array.
    - Amounts are decimal strings. Sign convention: money leaving the account (purchases, fees, withdrawals, payments made) is NEGATIVE; money arriving (deposits, refunds, interest earned) is POSITIVE.${
-     isCard
-       ? " For this credit card: charges NEGATIVE, payments and credits POSITIVE."
+     owed
+       ? ` For this ${kindNoun}: charges, draws, interest and fees NEGATIVE (they add to what is owed); payments and credits POSITIVE (they reduce it).`
        : ""
    }
    - Skip running-balance columns, summary lines, subtotals and totals — individual transactions only.
@@ -70,9 +76,9 @@ ${
 2. The statement's opening and closing balances, into the balances array.
    - One entry with kind "opening" dated the first day of the statement period, one with kind "closing" dated the last day.
    - These are the "beginning balance" / "previous balance" and "ending balance" / "new balance" figures printed on the statement.${
-     isCard
+     owed
        ? `
-   - IMPORTANT: this is a credit card, so a balance owed is NEGATIVE. A "new balance" of $1,234.56 owed must be reported as "-1234.56". Report a credit (overpayment) as positive.`
+   - IMPORTANT: this is a ${kindNoun}, so a balance owed is NEGATIVE. A "new balance" of $1,234.56 owed must be reported as "-1234.56". Report a credit (overpayment) as positive.`
        : ""
    }
    - If only one of the two is printed, return just that one. If neither is printed, return an empty balances array — never invent or compute one.`
@@ -136,12 +142,12 @@ ${
     balances.push({ date, balanceCents, kind });
   }
 
-  // A card statement whose balances came back positive almost certainly lost a
+  // A debt statement whose balances came back positive almost certainly lost a
   // sign in extraction — flag rather than silently negate, since a genuine
   // credit balance is possible.
-  if (isCard && balances.length > 0 && balances.every((b) => b.balanceCents > 0)) {
+  if (owed && balances.length > 0 && balances.every((b) => b.balanceCents > 0)) {
     problems.push(
-      "Every balance on this card statement came back positive — check the sign before committing (money owed should be negative).",
+      `Every balance on this ${kindNoun} statement came back positive — check the sign before committing (money owed should be negative).`,
     );
   }
 

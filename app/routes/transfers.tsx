@@ -1,5 +1,6 @@
 import { Link, data, useFetcher } from "react-router";
 import {
+  accountLinkedTransfers,
   autoLinkTransfers,
   findTransferSuggestions,
   linkTransferPair,
@@ -7,6 +8,7 @@ import {
   rejectTransferPair,
   transferVolume,
   unlinkTransfer,
+  unlinkTransferAccount,
   unmatchedTransferLegs,
   type TransferSuggestion,
 } from "~/.server/transfers";
@@ -21,13 +23,15 @@ export function meta() {
 
 export async function loader(_: Route.LoaderArgs) {
   const month = monthOf(todayISO());
-  const [suggestions, linked, unmatched, monthMovedCents] = await Promise.all([
-    findTransferSuggestions(),
-    linkedTransfers(),
-    unmatchedTransferLegs(),
-    transferVolume(monthStart(month), monthEnd(month)),
-  ]);
-  return { suggestions, linked, unmatched, monthMovedCents };
+  const [suggestions, linked, unmatched, accountLinked, monthMovedCents] =
+    await Promise.all([
+      findTransferSuggestions(),
+      linkedTransfers(),
+      unmatchedTransferLegs(),
+      accountLinkedTransfers(),
+      transferVolume(monthStart(month), monthEnd(month)),
+    ]);
+  return { suggestions, linked, unmatched, accountLinked, monthMovedCents };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -51,6 +55,11 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (intent === "unlink") {
     await unlinkTransfer(Number(form.get("id")));
+    return { ok: true };
+  }
+
+  if (intent === "unlink-account") {
+    await unlinkTransferAccount(Number(form.get("id")));
     return { ok: true };
   }
 
@@ -105,7 +114,7 @@ function PairRow({
 }
 
 export default function Transfers({ loaderData }: Route.ComponentProps) {
-  const { suggestions, linked, unmatched, monthMovedCents } = loaderData;
+  const { suggestions, linked, unmatched, accountLinked, monthMovedCents } = loaderData;
   const fetcher = useFetcher<{ error?: string; scanned?: number }>();
   const busy = fetcher.state !== "idle";
 
@@ -197,10 +206,10 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
           <CardHeader title={`🦯 Unmatched transfer legs (${unmatched.length})`} />
           <div className="bg-ledger">
             <p className="groove m-2 bg-[#fff7dd] px-3 py-1.5 text-[11px] text-gray-700">
-              These are categorized as transfers but no opposite leg is linked. That's
-              fine when the far side isn't imported here (a savings goal tracked by balance
-              only, or an account you don't track) — otherwise import the other
-              account's statement and they'll pair up.
+              These are categorized as transfers but nothing is linked on the far side.
+              If the other account is tracked by balance only — a brokerage, a pension, a
+              mortgage — open the transaction and name it there. Otherwise import the
+              other account's statement and they'll pair up.
             </p>
             <ul className="ledger-stripes divide-y divide-primary-50">
               {unmatched.map((t) => (
@@ -226,6 +235,48 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
                     {t.amountCents < 0 ? "−" : "+"}
                     {formatCentsAbs(t.amountCents)}
                   </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </Card>
+      )}
+
+      {accountLinked.length > 0 && (
+        <Card>
+          <CardHeader title={`🏦 Linked to balance-only accounts (${accountLinked.length})`} />
+          <div className="bg-ledger">
+            <p className="groove m-2 bg-primary-50 px-3 py-1.5 text-[11px] text-gray-700">
+              These have no opposite row to pair with, so they name the far account
+              instead. They stay out of income and spending, and the balances page
+              counts them as money paid in when it works out what the market did.
+            </p>
+            <ul className="ledger-stripes divide-y divide-primary-50">
+              {accountLinked.map((t) => (
+                <li key={t.id} className="flex items-center gap-3 px-3 py-1.5">
+                  <span className="w-24 shrink-0 font-mono text-[10px] text-gray-500">
+                    {formatDate(t.date)}
+                  </span>
+                  <span className="w-36 shrink-0 truncate text-[11px] font-bold text-gray-800">
+                    {t.accountName} → {t.targetAccountName}
+                  </span>
+                  <Link
+                    to={`/transactions/${t.id}`}
+                    className="min-w-0 flex-1 truncate text-[11px] text-gray-700 hover:text-primary-700 hover:underline"
+                    title={t.description}
+                  >
+                    {t.description}
+                  </Link>
+                  <span className="shrink-0 font-mono text-[11px] tabular-nums text-gray-800">
+                    {formatCentsAbs(t.amountCents)}
+                  </span>
+                  <fetcher.Form method="post">
+                    <input type="hidden" name="intent" value="unlink-account" />
+                    <input type="hidden" name="id" value={t.id} />
+                    <Button type="submit" size="sm" variant="ghost" disabled={busy}>
+                      Unlink
+                    </Button>
+                  </fetcher.Form>
                 </li>
               ))}
             </ul>

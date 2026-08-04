@@ -2,7 +2,6 @@ import {
   Form,
   Link,
   data,
-  useFetcher,
   useRouteLoaderData,
   useSearchParams,
 } from "react-router";
@@ -15,13 +14,18 @@ import {
 } from "~/.server/queries";
 import { recordUserChoice } from "~/.server/categorize";
 import { CategoryPicker } from "~/components/category-picker";
+import {
+  CategorizeControl,
+  CategorizeStatus,
+  useCategorizeRun,
+} from "~/components/categorize-run";
 import { Pagination } from "~/components/pagination";
 import {
   Amount,
   Button,
   ClassBadge,
+  ClearedMark,
   EmptyState,
-  MessageBar,
   inputClass,
   selectClass,
 } from "~/components/ui";
@@ -87,15 +91,17 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
   const categories = shell?.categories ?? [];
   const accounts = shell?.accounts ?? [];
 
-  const hasFilters = ["account", "category", "class", "from", "to", "q"].some(
-    (k) => searchParams.get(k),
-  );
+  const hasFilters = [
+    "account",
+    "category",
+    "class",
+    "from",
+    "to",
+    "q",
+    "reconciled",
+  ].some((k) => searchParams.get(k));
 
-  const aiFetcher = useFetcher<{
-    stats?: { fromMemory: number; fromAi: number; lowConfidence: number; remaining: number };
-    error?: string;
-  }>();
-  const aiBusy = aiFetcher.state !== "idle";
+  const categorizeRun = useCategorizeRun();
   const uncategorizedCount = shell?.uncategorizedCount ?? 0;
 
   return (
@@ -104,30 +110,10 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
         <h1 className="text-[16px] font-bold text-primary-950">
           📒 Transactions
         </h1>
-        {uncategorizedCount > 0 && (
-          <aiFetcher.Form method="post" action="/api/ai/categorize">
-            <Button type="submit" disabled={aiBusy} size="sm">
-              {aiBusy
-                ? "🔮 Categorizing…"
-                : `🔮 Categorize ${uncategorizedCount.toLocaleString()} Uncategorized Transactions`}
-            </Button>
-          </aiFetcher.Form>
-        )}
+        <CategorizeControl run={categorizeRun} uncategorizedCount={uncategorizedCount} />
       </div>
 
-      {aiFetcher.data?.stats && (
-        <MessageBar kind="success">
-          Categorized {aiFetcher.data.stats.fromMemory} transactions from merchant memory and{" "}
-          {aiFetcher.data.stats.fromAi} with AI.
-          {aiFetcher.data.stats.lowConfidence > 0 &&
-            ` ${aiFetcher.data.stats.lowConfidence} were left uncategorized (low confidence).`}
-          {aiFetcher.data.stats.remaining > 0 &&
-            ` ${aiFetcher.data.stats.remaining} still queued — run it again.`}
-        </MessageBar>
-      )}
-      {aiFetcher.data?.error && (
-        <MessageBar kind="error">{aiFetcher.data.error}</MessageBar>
-      )}
+      <CategorizeStatus run={categorizeRun} />
 
       <Form method="get" className="bevel-out flex flex-wrap items-center gap-2 p-2">
         <input
@@ -164,6 +150,15 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
             </option>
           ))}
         </select>
+        <select
+          name="reconciled"
+          defaultValue={searchParams.get("reconciled") ?? ""}
+          className={selectClass}
+        >
+          <option value="">Reconciled or not</option>
+          <option value="yes">Reconciled</option>
+          <option value="no">Not reconciled</option>
+        </select>
         <input type="date" name="from" defaultValue={searchParams.get("from") ?? ""} className={selectClass} />
         <input type="date" name="to" defaultValue={searchParams.get("to") ?? ""} className={selectClass} />
         <Button type="submit" variant="secondary" size="sm">
@@ -182,7 +177,7 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
           detail={
             hasFilters
               ? "Loosen the filters and search again."
-              : "Import a statement to get started."
+              : "Import a transaction export to get started."
           }
         >
           {!hasFilters && (
@@ -196,6 +191,12 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
           <table className="ledger-stripes w-full text-[12px]">
             <thead>
               <tr className="bevel-out text-left text-[11px] font-bold text-gray-800">
+                <th
+                  className="w-6 px-2 py-2.5 text-center"
+                  title="Reconciled — ✓ ties out, ! in a period that is off, · not yet checked"
+                >
+                  R
+                </th>
                 <th className="px-4 py-2.5">Date</th>
                 <th className="px-4 py-2.5">Description</th>
                 <th className="px-4 py-2.5">Account</th>
@@ -206,6 +207,9 @@ export default function Transactions({ loaderData }: Route.ComponentProps) {
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className="hover:bg-primary-100">
+                  <td className="px-2 py-1 text-center">
+                    <ClearedMark state={r.cleared} />
+                  </td>
                   <td className="whitespace-nowrap px-3 py-1 font-mono text-[11px] text-gray-600">
                     {formatDate(r.date)}
                   </td>

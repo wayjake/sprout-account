@@ -2,6 +2,8 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "~/.server/db";
 import { chatJSON } from "~/.server/openrouter";
+import { looksLikeTransfer } from "~/.server/transfers";
+import { isLiability, paymentCategoryName } from "~/lib/accounts";
 
 /**
  * How much of a description survives into the merchant key. Long enough to keep
@@ -84,6 +86,61 @@ export function normalizeMerchant(description: string): string {
   return s || description.toUpperCase().trim().slice(0, MERCHANT_KEY_MAX);
 }
 
+/** The category fields the liability guard needs to resolve an assignment. */
+type GuardCategory = Pick<
+  schema.Category,
+  "id" | "name" | "spendingClass" | "isArchived"
+>;
+
+/**
+ * A positive amount on a debt — card, line of credit, mortgage or loan — is
+ * money coming *off* what is owed. It is a payment or a credit, and is never
+ * household income.
+ *
+ * Transfer matching (`transfers.ts`) normally turns the payment leg into a
+ * linked pair, but only when the funding account's leg was imported too.
+ * Import a card statement on its own and there is nothing to pair with, so the
+ * row falls through to the AI, which has categorized "AUTOPAY PAYMENT RECEIVED
+ * - THANK YOU" as Salary. This is the deterministic backstop that runs before
+ * both the memory and AI passes.
+ *
+ * Returns the category id to force, `null` to leave the row uncategorized
+ * rather than let an income category stand, or `undefined` when the guard has
+ * no opinion and the caller's own choice should win.
+ */
+export function guardLiabilityCredit(
+  txn: { amountCents: number; description: string },
+  accountType: schema.AccountType,
+  proposedCategoryId: number | null,
+  categories: GuardCategory[],
+): number | null | undefined {
+  if (!isLiability(accountType) || txn.amountCents <= 0) return undefined;
+
+  const proposed =
+    proposedCategoryId == null
+      ? undefined
+      : categories.find((c) => c.id === proposedCategoryId);
+  const proposedIsIncome = proposed?.spendingClass === "income";
+
+  if (looksLikeTransfer(txn.description)) {
+    const wanted = paymentCategoryName(accountType)?.toLowerCase();
+    const payment =
+      categories.find(
+        (c) =>
+          !c.isArchived &&
+          c.spendingClass === "transfer" &&
+          c.name.toLowerCase() === wanted,
+      ) ?? categories.find((c) => !c.isArchived && c.spendingClass === "transfer");
+    if (payment) return payment.id;
+    // No transfer category on file — still better uncategorized than income.
+    return proposedIsIncome ? null : undefined;
+  }
+
+  // Refunds, statement credits and escrow adjustments: not a payment, but not
+  // income either.
+  return proposedIsIncome ? null : undefined;
+}
+
 /**
  * Record a user's manual category choice so future imports of the same
  * merchant auto-categorize. User choices always win over AI-sourced rows.
@@ -140,7 +197,12 @@ export async function loadMemory(): Promise<MemoryRow[]> {
  * 1. exact match; 2. prefix match (either direction, both sides ≥ 6 chars),
  * preferring user-sourced rows, then higher useCount.
  */
-const AI_BATCH_SIZE = 40;
+/**
+ * Rows per AI request. Also the chunk size the client runs a bulk
+ * categorization in (`api.ai-categorize.ts`), so one chunk is one AI call —
+ * which is what bounds how long a cancel takes to land.
+ */
+export const AI_BATCH_SIZE = 40;
 const AI_CONFIDENCE_THRESHOLD = 0.6;
 
 const AssignmentsSchema = z.object({
@@ -157,13 +219,16 @@ const AssignmentsSchema = z.object({
 export interface CategorizeStats {
   fromMemory: number;
   fromAi: number;
+  fromRule: number;
+  blocked: number;
   lowConfidence: number;
   remaining: number;
 }
 
 /**
  * Categorize the given transactions (or all uncategorized ones when ids is
- * null): free merchant-memory pass first, then AI for whatever is left.
+ * null): credit-card guard first, then free merchant memory, then AI for
+ * whatever is left.
  */
 export async function categorizeTransactions(
   ids: number[] | null,
@@ -171,8 +236,16 @@ export async function categorizeTransactions(
 ): Promise<CategorizeStats> {
   const t = schema.transactions;
   const targets = await db
-    .select({ id: t.id, merchant: t.merchant, description: t.description, amountCents: t.amountCents, date: t.date })
+    .select({
+      id: t.id,
+      merchant: t.merchant,
+      description: t.description,
+      amountCents: t.amountCents,
+      date: t.date,
+      accountType: schema.accounts.accountType,
+    })
     .from(t)
+    .innerJoin(schema.accounts, eq(schema.accounts.id, t.accountId))
     .where(
       ids
         ? and(inArray(t.id, ids), isNull(t.categoryId))
@@ -183,32 +256,53 @@ export async function categorizeTransactions(
   const stats: CategorizeStats = {
     fromMemory: 0,
     fromAi: 0,
+    fromRule: 0,
+    blocked: 0,
     lowConfidence: 0,
     remaining: 0,
   };
   if (targets.length === 0) return stats;
 
-  // Pass 1: merchant memory — free, no network
+  // Archived categories are excluded from what the AI may pick, but the guard
+  // still has to recognise one a memory row points at.
+  const allCategories = await db.select().from(schema.categories);
+  const categories = allCategories.filter((c) => !c.isArchived);
+
+  // Pass 1: rules and merchant memory — free, no network
   const memory = await loadMemory();
   const unresolved: typeof targets = [];
   for (const txn of targets) {
-    const hit = lookupMemory(txn.merchant, memory);
-    if (hit) {
+    const forced = guardLiabilityCredit(txn, txn.accountType, null, allCategories);
+    if (forced != null) {
       await db
         .update(t)
-        .set({ categoryId: hit.categoryId, categorySource: "memory" })
+        .set({ categoryId: forced, categorySource: "auto" })
         .where(eq(t.id, txn.id));
-      stats.fromMemory++;
-    } else {
-      unresolved.push(txn);
+      stats.fromRule++;
+      continue;
     }
+
+    const hit = lookupMemory(txn.merchant, memory);
+    if (!hit) {
+      unresolved.push(txn);
+      continue;
+    }
+    // A remembered income category on a card credit is the bug this guards
+    // against — leave it uncategorized rather than trust stale memory.
+    if (
+      guardLiabilityCredit(txn, txn.accountType, hit.categoryId, allCategories) === null
+    ) {
+      stats.blocked++;
+      continue;
+    }
+    await db
+      .update(t)
+      .set({ categoryId: hit.categoryId, categorySource: "memory" })
+      .where(eq(t.id, txn.id));
+    stats.fromMemory++;
   }
 
   // Pass 2: AI for the rest, in batches
-  const categories = await db
-    .select()
-    .from(schema.categories)
-    .where(eq(schema.categories.isArchived, false));
   const categoryIds = new Set(categories.map((c) => c.id));
   const categoryList = categories
     .map((c) => `${c.id}: ${c.name} (${c.spendingClass})`)
@@ -263,6 +357,14 @@ ${categoryList}`,
         a.confidence < AI_CONFIDENCE_THRESHOLD
       ) {
         stats.lowConfidence++;
+        continue;
+      }
+      // Reject an income category on a credit-card credit outright, and keep
+      // it out of merchant memory so the mistake cannot be replayed for free.
+      if (
+        guardLiabilityCredit(txn, txn.accountType, a.categoryId, allCategories) === null
+      ) {
+        stats.blocked++;
         continue;
       }
       await db

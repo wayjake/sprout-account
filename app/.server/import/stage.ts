@@ -3,10 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { and, asc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
-import { loadMemory, lookupMemory, normalizeMerchant } from "~/.server/categorize";
+import {
+  guardLiabilityCredit,
+  loadMemory,
+  lookupMemory,
+  normalizeMerchant,
+} from "~/.server/categorize";
 import { autoLinkTransfers } from "~/.server/transfers";
 import type { PendingRows } from "~/.server/balances";
 import { accountLabel } from "~/lib/accounts";
+import { addDays, daysBetween } from "~/lib/dates";
 import type { NormalizedBalanceRow, NormalizedTxnRow } from "~/lib/csv-mapping";
 
 export function sha256(input: Buffer | string): string {
@@ -44,6 +50,17 @@ export interface StagedTxnData {
   description: string;
   merchant: string;
   amountCents: number;
+  /** Set on a statement row that a close found already in the books */
+  matchedDate?: string;
+  matchedDescription?: string;
+  /**
+   * The books hold this transaction with the opposite sign. Almost always the
+   * extractor read the direction backwards off the PDF; adding the row would
+   * double-count it, so it is never offered as a gap to fill.
+   */
+  signConflict?: boolean;
+  /** The ledger row's amount, when it disagrees with the statement's */
+  matchedAmountCents?: number;
 }
 
 export interface StagedBalanceData {
@@ -75,8 +92,11 @@ export function computeTxnHashes(rows: NormalizedTxnRow[]): string[] {
   });
 }
 
-export async function createSession() {
-  const [session] = await db.insert(schema.importSessions).values({}).returning();
+export async function createSession(purpose: schema.SessionPurpose = "import") {
+  const [session] = await db
+    .insert(schema.importSessions)
+    .values({ purpose })
+    .returning();
   return session;
 }
 
@@ -247,6 +267,153 @@ async function buildTransactionRows(
   });
 }
 
+/**
+ * How far a statement line may sit from the ledger row it is the same
+ * transaction as. A card statement prints the posting date; a CSV export often
+ * carries the transaction date, and the two drift by a day or three.
+ */
+export const STATEMENT_MATCH_WINDOW_DAYS = 3;
+
+interface LedgerCandidate {
+  id: number;
+  date: string;
+  amountCents: number;
+  description: string;
+  normalized: string;
+}
+
+/**
+ * Statement rows, matched against what the books already hold rather than
+ * deduped against them. The question a month-end close asks is not "is this row
+ * new?" but "did my ledger already know about it?" — a statement line and its
+ * CSV twin rarely share a description ("SQ *COFFEE 1234" vs "Coffee Shop"), so
+ * the match is on amount and near-date only.
+ *
+ * Matched rows are staged `duplicate` and point at the ledger row they found;
+ * unmatched ones are staged `new`, and those are the gaps the close offers to
+ * fill. Matching is one-to-one and consumes its candidate, so two identical
+ * $5 charges on one day need two ledger rows to both come back matched.
+ */
+async function buildStatementTransactionRows(
+  batchId: number,
+  accountId: number,
+  rows: TxnRowInput[],
+) {
+  const hashes = computeTxnHashes(rows);
+  if (rows.length === 0) return [];
+
+  const dates = rows.map((r) => r.date).sort();
+  const ledger = await db
+    .select({
+      id: schema.transactions.id,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      description: schema.transactions.description,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.accountId, accountId),
+        gte(schema.transactions.date, addDays(dates[0], -STATEMENT_MATCH_WINDOW_DAYS)),
+        lte(
+          schema.transactions.date,
+          addDays(dates[dates.length - 1], STATEMENT_MATCH_WINDOW_DAYS),
+        ),
+      ),
+    );
+
+  const byAmount = new Map<number, LedgerCandidate[]>();
+  for (const t of ledger) {
+    if (!byAmount.has(t.amountCents)) byAmount.set(t.amountCents, []);
+    byAmount.get(t.amountCents)!.push({
+      id: t.id,
+      date: t.date,
+      amountCents: t.amountCents,
+      description: t.description,
+      normalized: normalizeDescription(t.description),
+    });
+  }
+
+  // Widening passes: every row that can be explained by a same-day ledger entry
+  // is settled before any row is allowed to reach across a day, so a near miss
+  // never steals the exact match belonging to another line.
+  const matched = new Map<number, LedgerCandidate>();
+  const taken = new Set<number>();
+  for (let slack = 0; slack <= STATEMENT_MATCH_WINDOW_DAYS; slack++) {
+    rows.forEach((row, i) => {
+      if (matched.has(i)) return;
+      const normalized = normalizeDescription(row.description);
+      const candidate = (byAmount.get(row.amountCents) ?? [])
+        .filter(
+          (c) => !taken.has(c.id) && Math.abs(daysBetween(c.date, row.date)) <= slack,
+        )
+        // Same wording is the surest sign of the same transaction; after that,
+        // the nearest date, then the oldest row, so the result never wobbles.
+        .sort(
+          (a, b) =>
+            Number(b.normalized === normalized) - Number(a.normalized === normalized) ||
+            Math.abs(daysBetween(a.date, row.date)) -
+              Math.abs(daysBetween(b.date, row.date)) ||
+            a.id - b.id,
+        )[0];
+      if (!candidate) return;
+      matched.set(i, candidate);
+      taken.add(candidate.id);
+    });
+  }
+
+  // Last resort, and only for lines nothing matched: a ledger row of the exact
+  // opposite amount is the same transaction with its direction reversed — an
+  // incoming transfer the extractor read as outgoing. Offering it as a gap to
+  // fill would insert a second, wrong-signed copy and throw the period off by
+  // twice the amount, so it is reported as a conflict instead. This runs only
+  // after every exact pass, so it can never take a row that a line matches
+  // outright.
+  const signConflicts = new Map<number, LedgerCandidate>();
+  rows.forEach((row, i) => {
+    if (matched.has(i)) return;
+    const candidate = (byAmount.get(-row.amountCents) ?? [])
+      .filter(
+        (c) =>
+          !taken.has(c.id) &&
+          Math.abs(daysBetween(c.date, row.date)) <= STATEMENT_MATCH_WINDOW_DAYS,
+      )
+      .sort(
+        (a, b) =>
+          Math.abs(daysBetween(a.date, row.date)) -
+            Math.abs(daysBetween(b.date, row.date)) || a.id - b.id,
+      )[0];
+    if (!candidate || candidate.amountCents === 0) return;
+    signConflicts.set(i, candidate);
+    taken.add(candidate.id);
+  });
+
+  return rows.map((r, i) => {
+    const hit = matched.get(i);
+    const flipped = signConflicts.get(i);
+    const found = hit ?? flipped;
+    const data: StagedTxnData = {
+      date: r.date,
+      description: r.description,
+      merchant: normalizeMerchant(r.description),
+      amountCents: r.amountCents,
+      matchedDate: found?.date,
+      matchedDescription: found?.description,
+      signConflict: flipped ? true : undefined,
+      matchedAmountCents: flipped?.amountCents,
+    };
+    return {
+      batchId,
+      rowKind: "transaction" as const,
+      rowIndex: r.rowIndex ?? i,
+      dataJson: JSON.stringify(data),
+      dedupeHash: hashes[i],
+      status: (found ? "duplicate" : "new") as (typeof schema.STAGED_STATUSES)[number],
+      duplicateOfId: found?.id ?? null,
+    };
+  });
+}
+
 async function buildBalanceRows(
   batchId: number,
   accountId: number,
@@ -300,15 +467,24 @@ function countStatuses(rows: { status: string }[]): StageCounts {
 /**
  * Stage a file's contents. One batch may carry both kinds — a statement PDF
  * yields transactions and the closing balance that checks them.
+ *
+ * `matchLedger` switches transaction rows from import dedupe to the month-end
+ * close's ledger match; see `buildStatementTransactionRows`.
  */
 export async function stageBatchRows(
   batchId: number,
   accountId: number,
-  input: { txns?: TxnRowInput[]; balances?: BalanceRowInput[] },
+  input: {
+    txns?: TxnRowInput[];
+    balances?: BalanceRowInput[];
+    matchLedger?: boolean;
+  },
 ) {
   const txns = input.txns ?? [];
   const balances = input.balances ?? [];
-  const txnRows = await buildTransactionRows(batchId, accountId, txns);
+  const txnRows = input.matchLedger
+    ? await buildStatementTransactionRows(batchId, accountId, txns)
+    : await buildTransactionRows(batchId, accountId, txns);
   const balanceRows = await buildBalanceRows(batchId, accountId, balances);
   const staged = [...txnRows, ...balanceRows];
 
@@ -373,8 +549,23 @@ export async function restageBatchAccount(batchId: number, newAccountId: number)
     .set({ accountId: newAccountId, accountLabel: accountLabel(account) })
     .where(eq(schema.importBatches.id, batchId));
   if (existing.length > 0) {
-    await stageBatchRows(batchId, newAccountId, { txns, balances });
+    await stageBatchRows(batchId, newAccountId, {
+      txns,
+      balances,
+      // Ledger matching is relative to the account too, so a statement moved to
+      // a different account has to be re-matched the way it was staged.
+      matchLedger: await isReconcileBatch(batch),
+    });
   }
+}
+
+/** Does this batch belong to a month-end close rather than a CSV import? */
+async function isReconcileBatch(batch: { sessionId: number | null }) {
+  if (batch.sessionId == null) return false;
+  const session = await db.query.importSessions.findFirst({
+    where: eq(schema.importSessions.id, batch.sessionId),
+  });
+  return session?.purpose === "reconcile";
 }
 
 // --- overlap between files in one upload ---
@@ -618,6 +809,7 @@ export async function commitBatch(
     );
 
   const memory = await loadMemory();
+  const allCategories = await db.select().from(schema.categories);
   const stats = emptyStats();
 
   db.transaction((tx) => {
@@ -643,6 +835,18 @@ export async function commitBatch(
 
       const data = JSON.parse(row.dataJson) as StagedTxnData;
       const memoryHit = lookupMemory(data.merchant, memory);
+      // A credit on a card is a payment or a refund, never income — force or
+      // withhold the category regardless of what memory suggests.
+      const guarded = guardLiabilityCredit(
+        data,
+        account.accountType,
+        memoryHit?.categoryId ?? null,
+        allCategories,
+      );
+      const categoryId =
+        guarded === undefined ? (memoryHit?.categoryId ?? null) : guarded;
+      const categorySource: schema.CategorySource | null =
+        categoryId == null ? null : guarded === undefined ? "memory" : "auto";
       const inserted = tx
         .insert(schema.transactions)
         .values({
@@ -651,8 +855,8 @@ export async function commitBatch(
           amountCents: data.amountCents,
           description: data.description,
           merchant: data.merchant,
-          categoryId: memoryHit?.categoryId ?? null,
-          categorySource: memoryHit ? "memory" : null,
+          categoryId,
+          categorySource,
           importBatchId: batchId,
           dedupeHash: row.dedupeHash,
         })
@@ -661,7 +865,7 @@ export async function commitBatch(
         .all();
       if (inserted.length > 0) {
         stats.inserted++;
-        if (memoryHit) stats.autoCategorized++;
+        if (categoryId != null) stats.autoCategorized++;
       } else {
         stats.skipped++;
       }

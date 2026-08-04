@@ -25,6 +25,9 @@ export const ACCOUNT_TYPES = [
   "checking",
   "savings",
   "credit_card",
+  "line_of_credit",
+  "mortgage",
+  "loan",
   "investment",
   "retirement",
   "other",
@@ -84,6 +87,16 @@ export const transactions = sqliteTable(
       (): AnySQLiteColumn => transactions.id,
       { onDelete: "set null" },
     ),
+    /**
+     * The far side of a transfer when that account keeps no ledger of its own —
+     * a contribution into a balance-only investment, or a payment against a
+     * balance-only mortgage. `transferPeerId` pairs this row with another row;
+     * this pairs it with an account, because no opposite row will ever exist.
+     * Mutually exclusive with `transferPeerId`.
+     */
+    transferAccountId: integer("transfer_account_id").references(
+      () => accounts.id,
+    ),
     notes: text("notes"),
     importBatchId: integer("import_batch_id").references(
       () => importBatches.id,
@@ -98,6 +111,7 @@ export const transactions = sqliteTable(
     index("txn_category_idx").on(t.categoryId),
     index("txn_merchant_idx").on(t.merchant),
     index("txn_transfer_peer_idx").on(t.transferPeerId),
+    index("txn_transfer_account_idx").on(t.transferAccountId),
   ],
 );
 
@@ -174,9 +188,20 @@ export const BATCH_STATUSES = [
   "discarded",
 ] as const;
 
+/**
+ * Which of the two upload flows a session belongs to. `import` is the CSV
+ * transaction import — files are the source of the ledger. `reconcile` is the
+ * month-end close against PDF statements — the statement is the authority the
+ * ledger is checked against, and only the rows it turns out to be missing get
+ * added. The two never mix in one session.
+ */
+export const SESSION_PURPOSES = ["import", "reconcile"] as const;
+export type SessionPurpose = (typeof SESSION_PURPOSES)[number];
+
 /** One upload of N files. Batches under it are reviewed and committed together. */
 export const importSessions = sqliteTable("import_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  purpose: text("purpose", { enum: SESSION_PURPOSES }).notNull().default("import"),
   status: text("status", { enum: ["open", "committed", "discarded"] })
     .notNull()
     .default("open"),

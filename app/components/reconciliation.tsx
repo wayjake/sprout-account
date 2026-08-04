@@ -56,8 +56,11 @@ function WindowRow({ window }: { window: ReconcileWindow }) {
   }
 
   const ok = window.status === "ok";
+  // Market movement on a balance-only account is expected, not a problem —
+  // it gets neutral styling rather than the red of a real mismatch.
+  const movement = window.status === "movement";
   return (
-    <tr className={ok ? "" : "bg-[#fff7f7]"}>
+    <tr className={ok || movement ? "" : "bg-[#fff7f7]"}>
       <td className="px-3 py-1.5 whitespace-nowrap">
         {window.fromDate ? `${formatDate(window.fromDate)} → ` : ""}
         {formatDate(window.toDate)}
@@ -70,7 +73,7 @@ function WindowRow({ window }: { window: ReconcileWindow }) {
       </td>
       <td
         className={`px-3 py-1.5 text-right font-mono tabular-nums ${
-          ok ? "text-positive" : "font-bold text-negative"
+          ok ? "text-positive" : movement ? "text-gray-700" : "font-bold text-negative"
         }`}
       >
         {ok ? "✓ 0.00" : formatCents(window.diffCents ?? 0)}
@@ -78,6 +81,8 @@ function WindowRow({ window }: { window: ReconcileWindow }) {
       <td className="px-3 py-1.5">
         {ok ? (
           <span className="text-[11px] text-positive">reconciles</span>
+        ) : movement ? (
+          <span className="text-[11px] text-gray-600">{window.note}</span>
         ) : (
           <span className="text-[11px] font-bold text-negative">
             off by {formatCentsAbs(window.diffCents ?? 0)}
@@ -91,6 +96,9 @@ function WindowRow({ window }: { window: ReconcileWindow }) {
 export function AccountReconcileCard({ recon }: { recon: AccountReconciliation }) {
   const mismatches = recon.windows.filter((w) => w.status === "mismatch");
   const checked = recon.windows.filter((w) => w.status !== "unanchored");
+  // A balance-only account is measured against what was paid into it, not
+  // against a ledger it doesn't keep.
+  const balanceOnly = recon.accountKind === "balance";
 
   return (
     <div className="groove bg-ledger p-2">
@@ -108,7 +116,9 @@ export function AccountReconcileCard({ recon }: { recon: AccountReconciliation }
           {recon.status === "mismatch"
             ? `${mismatches.length} problem${mismatches.length === 1 ? "" : "s"}`
             : checked.length > 0
-              ? "balanced"
+              ? balanceOnly
+                ? "tracked"
+                : "balanced"
               : "no anchor"}
         </span>
       </div>
@@ -119,7 +129,9 @@ export function AccountReconcileCard({ recon }: { recon: AccountReconciliation }
             <tr className="border-b border-primary-100 text-left text-[10px] font-bold uppercase text-primary-800">
               <th className="px-3 py-1">Period</th>
               <th className="px-3 py-1 text-right">Statement</th>
-              <th className="px-3 py-1 text-right">Activity</th>
+              <th className="px-3 py-1 text-right">
+                {balanceOnly ? "Paid in" : "Activity"}
+              </th>
               <th className="px-3 py-1 text-right">Gap</th>
               <th className="px-3 py-1">Result</th>
             </tr>

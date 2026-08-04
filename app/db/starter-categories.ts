@@ -6,10 +6,14 @@ export const STARTER_CATEGORIES: {
   sortOrder: number;
 }[] = [
   { name: "Mortgage", spendingClass: "base", sortOrder: 0 },
-  { name: "Utilities", spendingClass: "base", sortOrder: 1 },
-  { name: "Insurance", spendingClass: "base", sortOrder: 2 },
-  { name: "Internet & Phone", spendingClass: "base", sortOrder: 3 },
-  { name: "Childcare", spendingClass: "base", sortOrder: 4 },
+  { name: "Loan Repayment", spendingClass: "base", sortOrder: 1 },
+  // Interest posted on a transaction-tracked debt. The principal half of a
+  // payment links away as a transfer; this is the half that is really spending.
+  { name: "Interest", spendingClass: "base", sortOrder: 2 },
+  { name: "Utilities", spendingClass: "base", sortOrder: 3 },
+  { name: "Insurance", spendingClass: "base", sortOrder: 4 },
+  { name: "Internet & Phone", spendingClass: "base", sortOrder: 5 },
+  { name: "Childcare", spendingClass: "base", sortOrder: 6 },
   { name: "Groceries", spendingClass: "living", sortOrder: 10 },
   { name: "Gas & Auto", spendingClass: "living", sortOrder: 11 },
   { name: "Health", spendingClass: "living", sortOrder: 12 },
@@ -25,4 +29,5 @@ export const STARTER_CATEGORIES: {
   { name: "Other Income", spendingClass: "income", sortOrder: 33 },
   { name: "Transfer", spendingClass: "transfer", sortOrder: 40 },
   { name: "Credit Card Payment", spendingClass: "transfer", sortOrder: 41 },
+  { name: "Loan Payment", spendingClass: "transfer", sortOrder: 42 },
 ];

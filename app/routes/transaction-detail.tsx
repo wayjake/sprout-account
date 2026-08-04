@@ -4,11 +4,15 @@ import type { Category } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
 import { applyItemSplits } from "~/.server/amazon";
+import { clearedStateFor, clearedWindows } from "~/.server/balances";
 import { recordUserChoice } from "~/.server/categorize";
 import {
+  balanceTransferTargets,
   findCandidatesFor,
   linkTransferPair,
+  linkTransferToAccount,
   unlinkTransfer,
+  unlinkTransferAccount,
 } from "~/.server/transfers";
 import { CategoryOptions } from "~/components/category-picker";
 import {
@@ -17,10 +21,12 @@ import {
   Card,
   CardHeader,
   ClassBadge,
+  ClearedMark,
   Field,
   inputClass,
   selectClass,
 } from "~/components/ui";
+import { ACCOUNT_TYPE_LABELS } from "~/lib/accounts";
 import { formatDate } from "~/lib/dates";
 import { centsToInput, formatCents, parseCentsInput } from "~/lib/money";
 import type { loader as shellLoader } from "./shell";
@@ -47,10 +53,34 @@ export async function loader({ params }: Route.LoaderArgs) {
     },
   });
   if (!transaction) throw data("Transaction not found", { status: 404 });
-  const transferCandidates = transaction.transferPeerId
-    ? []
-    : await findCandidatesFor(id);
-  return { transaction, transferCandidates };
+  // Once either kind of link is in place there is nothing left to choose.
+  const linked = transaction.transferPeerId || transaction.transferAccountId;
+  const [transferCandidates, transferTargets, transferAccount] = await Promise.all([
+    linked ? [] : findCandidatesFor(id),
+    transaction.transferPeerId ? [] : balanceTransferTargets(),
+    transaction.transferAccountId
+      ? db.query.accounts.findFirst({
+          where: eq(schema.accounts.id, transaction.transferAccountId),
+        })
+      : null,
+  ]);
+  // Derived from the period this row sits in, not stored on the row.
+  const windows = await clearedWindows();
+  const accountWindows = windows.get(transaction.accountId);
+  const cleared = clearedStateFor(accountWindows, transaction.date);
+  const clearedWindow =
+    accountWindows?.find(
+      (w) => transaction.date > w.fromDate && transaction.date <= w.toDate,
+    ) ?? null;
+
+  return {
+    transaction,
+    transferCandidates,
+    transferTargets,
+    transferAccount: transferAccount ?? null,
+    cleared,
+    clearedWindow,
+  };
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
@@ -169,6 +199,19 @@ export async function action({ params, request }: Route.ActionArgs) {
     return { ok: true };
   }
 
+  if (intent === "link-transfer-account") {
+    const accountId = Number(form.get("accountId"));
+    if (!accountId) return data({ error: "Pick an account." }, { status: 400 });
+    const error = await linkTransferToAccount(id, accountId, "user");
+    if (error) return data({ error }, { status: 400 });
+    return { ok: true };
+  }
+
+  if (intent === "unlink-transfer-account") {
+    await unlinkTransferAccount(id);
+    return { ok: true };
+  }
+
   if (intent === "delete") {
     // db:push created transfer_peer_id without its FK (SQLite can't add one
     // in-place), so clear the surviving leg's pointer ourselves.
@@ -224,7 +267,14 @@ export default function TransactionDetail({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const { transaction: txn, transferCandidates } = loaderData;
+  const {
+    transaction: txn,
+    transferCandidates,
+    transferTargets,
+    transferAccount,
+    cleared,
+    clearedWindow,
+  } = loaderData;
   const shell = useRouteLoaderData<typeof shellLoader>("routes/shell");
   const categories = shell?.categories ?? [];
   const [splitting, setSplitting] = useState(txn.splits.length > 0);
@@ -245,6 +295,34 @@ export default function TransactionDetail({
           <h1 className="mt-1 text-[16px] font-bold text-primary-950">{txn.merchant}</h1>
           <p className="text-sm text-gray-500">
             {txn.description} · {txn.account.name} · {formatDate(txn.date)}
+          </p>
+          <p className="mt-1 flex items-center gap-1.5 text-[11px] text-gray-600">
+            <ClearedMark state={cleared} />
+            {clearedWindow ? (
+              <>
+                {cleared === "reconciled" ? "Reconciled" : "In a period that is off"} —{" "}
+                {formatDate(clearedWindow.fromDate)} →{" "}
+                {formatDate(clearedWindow.toDate)}
+                {cleared === "mismatch" && (
+                  <Link
+                    to="/balances"
+                    className="font-medium text-primary-600 hover:underline"
+                  >
+                    what's off →
+                  </Link>
+                )}
+              </>
+            ) : (
+              <>
+                Not yet reconciled — no closed statement period covers this date.{" "}
+                <Link
+                  to="/reconcile"
+                  className="font-medium text-primary-600 hover:underline"
+                >
+                  Close a month →
+                </Link>
+              </>
+            )}
           </p>
         </div>
         <div className="text-right">
@@ -298,11 +376,35 @@ export default function TransactionDetail({
         </Form>
       </Card>
 
-      {(txn.transferPeer || transferCandidates.length > 0) && (
+      {(txn.transferPeer ||
+        transferAccount ||
+        transferCandidates.length > 0 ||
+        transferTargets.length > 0) && (
         <Card>
           <CardHeader title="⇄ Transfer link" />
           <div className="p-4">
-            {txn.transferPeer ? (
+            {transferAccount ? (
+              <div className="flex items-center justify-between gap-3">
+                <p className="min-w-0 text-sm text-gray-700">
+                  Far side:{" "}
+                  <span className="font-bold text-primary-700">
+                    {transferAccount.name}
+                  </span>{" "}
+                  · {ACCOUNT_TYPE_LABELS[transferAccount.accountType].toLowerCase()}
+                  <span className="mt-1 block text-xs text-gray-500">
+                    That account is tracked by balance only, so there is no opposite
+                    row to pair with. This counts as neither income nor spending, and
+                    the balances page measures it against what the statements show.
+                  </span>
+                </p>
+                <Form method="post">
+                  <input type="hidden" name="intent" value="unlink-transfer-account" />
+                  <Button variant="ghost" size="sm" type="submit">
+                    Unlink
+                  </Button>
+                </Form>
+              </div>
+            ) : txn.transferPeer ? (
               <div className="flex items-center justify-between gap-3">
                 <p className="min-w-0 text-sm text-gray-700">
                   Opposite leg:{" "}
@@ -327,30 +429,78 @@ export default function TransactionDetail({
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="text-xs text-gray-500">
-                  This looks like it could be one leg of a transfer between your own
-                  accounts. Linking it pairs the two legs and keeps both out of
-                  income and spending.
-                </p>
-                {transferCandidates.map((c) => {
-                  const other = c.out.id === txn.id ? c.in : c.out;
-                  return (
-                    <div key={other.id} className="flex items-center gap-3">
-                      <span className="min-w-0 flex-1 truncate text-sm text-gray-700" title={other.description}>
-                        <span className="font-bold">{other.accountName}</span> ·{" "}
-                        {formatDate(other.date)} · {other.description}
-                      </span>
-                      <Amount cents={other.amountCents} />
-                      <Form method="post">
-                        <input type="hidden" name="intent" value="link-transfer" />
-                        <input type="hidden" name="peerId" value={other.id} />
-                        <Button size="sm" variant="secondary" type="submit">
-                          ⇄ Link
-                        </Button>
-                      </Form>
+                {transferCandidates.length > 0 && (
+                  <>
+                    <p className="text-xs text-gray-500">
+                      This looks like it could be one leg of a transfer between your own
+                      accounts. Linking it pairs the two legs and keeps both out of
+                      income and spending.
+                    </p>
+                    {transferCandidates.map((c) => {
+                      const other = c.out.id === txn.id ? c.in : c.out;
+                      return (
+                        <div key={other.id} className="flex items-center gap-3">
+                          <span className="min-w-0 flex-1 truncate text-sm text-gray-700" title={other.description}>
+                            <span className="font-bold">{other.accountName}</span> ·{" "}
+                            {formatDate(other.date)} · {other.description}
+                          </span>
+                          <Amount cents={other.amountCents} />
+                          <Form method="post">
+                            <input type="hidden" name="intent" value="link-transfer" />
+                            <input type="hidden" name="peerId" value={other.id} />
+                            <Button size="sm" variant="secondary" type="submit">
+                              ⇄ Link
+                            </Button>
+                          </Form>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
+                {transferTargets.length > 0 && (
+                  <Form
+                    method="post"
+                    className={`flex items-end gap-2 ${
+                      transferCandidates.length > 0
+                        ? "border-t border-primary-100 pt-3"
+                        : ""
+                    }`}
+                  >
+                    <input
+                      type="hidden"
+                      name="intent"
+                      value="link-transfer-account"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <Field label="Moved to / from a balance-only account">
+                        <select
+                          name="accountId"
+                          defaultValue=""
+                          className={`${selectClass} w-full`}
+                          required
+                        >
+                          <option value="">— pick an account —</option>
+                          {transferTargets.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name} ({ACCOUNT_TYPE_LABELS[a.accountType].toLowerCase()})
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
                     </div>
-                  );
-                })}
+                    <Button size="sm" variant="secondary" type="submit">
+                      Link
+                    </Button>
+                  </Form>
+                )}
+
+                <p className="text-xs text-gray-500">
+                  An account tracked by balance only — a brokerage, a pension, a
+                  mortgage — never produces an opposite row to pair with. Naming it
+                  here keeps this out of spending and lets the balances page tell
+                  contributions apart from market movement.
+                </p>
               </div>
             )}
           </div>

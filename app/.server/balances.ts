@@ -1,8 +1,11 @@
 import { and, asc, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
-import type { Account, AccountType } from "~/db/schema";
+import type { Account, AccountKind, AccountType } from "~/db/schema";
+import { ACCOUNT_TYPE_LABELS, isLiability } from "~/lib/accounts";
 import { formatCentsAbs } from "~/lib/money";
 import { formatDate } from "~/lib/dates";
+
+export { isLiability };
 
 /**
  * Balances live on two legs:
@@ -15,11 +18,6 @@ import { formatDate } from "~/lib/dates";
  *
  * Sign is always household perspective: assets positive, money owed negative.
  */
-
-/** Credit cards (and anything else you owe) hold a negative balance. */
-export function isLiability(accountType: AccountType): boolean {
-  return accountType === "credit_card";
-}
 
 export interface Anchor {
   id: number;
@@ -154,7 +152,14 @@ export interface ReconcileWindow {
   diffCents: number | null;
   txnSumCents: number;
   txnCount: number;
-  status: "ok" | "mismatch" | "unanchored";
+  /**
+   * `movement` is not an error: on a balance-only account the gap between
+   * consecutive statements and the contributions recorded against it *is* the
+   * market return (or the interest accrued on a debt).
+   */
+  status: "ok" | "mismatch" | "movement" | "unanchored";
+  /** Plain-language reading of a `movement` gap. */
+  note?: string;
   issues: ReconcileIssue[];
 }
 
@@ -162,6 +167,7 @@ export interface AccountReconciliation {
   accountId: number;
   accountName: string;
   accountType: AccountType;
+  accountKind: AccountKind;
   windows: ReconcileWindow[];
   issues: ReconcileIssue[];
   status: "ok" | "mismatch" | "no_anchors";
@@ -271,6 +277,19 @@ function diagnose(
 }
 
 /**
+ * What a `movement` gap on a balance-only account means in words. An asset
+ * moved by the market; a debt grew by its interest.
+ */
+function movementNote(diffCents: number, accountType: AccountType): string {
+  if (isLiability(accountType)) {
+    return diffCents < 0
+      ? `${money(diffCents)} interest & fees`
+      : `${money(diffCents)} paid down beyond recorded payments`;
+  }
+  return diffCents > 0 ? `${money(diffCents)} market gain` : `${money(diffCents)} market loss`;
+}
+
+/**
  * Walk each account's anchors in date order and check that recorded activity
  * explains every move. `pending` rows are treated as though already committed,
  * which is how the import screen previews an outcome before writing anything.
@@ -334,6 +353,34 @@ export async function reconcileAccounts(
   const hasTxns = new Map(txnCounts.map((r) => [r.accountId, r.count > 0]));
   for (const t of pending?.txns ?? []) hasTxns.set(t.accountId, true);
 
+  // Legs held in *other* accounts that name one of these as their far side.
+  // A balance-only account keeps no ledger, so these are the only recorded
+  // movements into or out of it. Sign is flipped to that account's
+  // perspective: −1,000 leaving checking is +1,000 arriving here.
+  const contributionRows = await db
+    .select({
+      targetAccountId: schema.transactions.transferAccountId,
+      date: schema.transactions.date,
+      amountCents: schema.transactions.amountCents,
+      description: schema.transactions.description,
+    })
+    .from(schema.transactions)
+    .where(inArray(schema.transactions.transferAccountId, ids));
+
+  const contributionsByAccount = new Map<number, WindowTxn[]>();
+  for (const c of contributionRows) {
+    if (c.targetAccountId == null) continue;
+    if (!contributionsByAccount.has(c.targetAccountId)) {
+      contributionsByAccount.set(c.targetAccountId, []);
+    }
+    contributionsByAccount.get(c.targetAccountId)!.push({
+      date: c.date,
+      amountCents: -c.amountCents,
+      description: c.description,
+      pending: false,
+    });
+  }
+
   // Fold pending rows in. A pending balance on a date that already has one
   // replaces it, matching the upsert that commit performs.
   const snapshotsByAccount = new Map<number, Map<string, number>>();
@@ -379,17 +426,89 @@ export async function reconcileAccounts(
 
     const issues: ReconcileIssue[] = [];
 
-    // A positive credit-card balance means the card is in credit — real, but
-    // usually it means a sign got dropped on the way in.
+    // A positive balance on a debt means it is overpaid — real, but usually it
+    // means a sign got dropped on the way in.
     if (isLiability(account.accountType)) {
       const positive = anchors.filter((a) => a.balanceCents > 0);
       if (positive.length > 0) {
+        const noun = ACCOUNT_TYPE_LABELS[account.accountType].toLowerCase();
         issues.push({
           severity: "warning",
-          message: `${positive.length} balance${positive.length === 1 ? "" : "s"} on this credit card ${positive.length === 1 ? "is" : "are"} positive.`,
-          fix: "Money owed should be negative (−1,234.56). A positive figure means the card is in credit.",
+          message: `${positive.length} balance${positive.length === 1 ? "" : "s"} on this ${noun} ${positive.length === 1 ? "is" : "are"} positive.`,
+          fix: "Money owed should be negative (−1,234.56). A positive figure means the account is overpaid.",
         });
       }
+    }
+
+    // A balance-only account has no ledger to check a statement against, but
+    // contributions pointed at it from other accounts do explain part of every
+    // move. What they don't explain is the market (or the interest on a debt),
+    // and separating those two is the whole point of the exercise.
+    if (account.kind === "balance" && anchors.length > 0) {
+      const contributions = (contributionsByAccount.get(account.id) ?? []).sort((a, b) =>
+        a.date.localeCompare(b.date),
+      );
+      const windows: ReconcileWindow[] = [];
+
+      for (let i = 0; i < anchors.length; i++) {
+        const to = anchors[i];
+        const from = i === 0 ? null : anchors[i - 1];
+        if (!from) {
+          windows.push({
+            fromDate: null,
+            fromCents: null,
+            toDate: to.date,
+            toCents: to.balanceCents,
+            expectedCents: null,
+            diffCents: null,
+            txnSumCents: 0,
+            txnCount: 0,
+            status: "unanchored",
+            issues: [],
+          });
+          continue;
+        }
+        const inWindow = contributions.filter(
+          (c) => c.date > from.date && c.date <= to.date,
+        );
+        const contributed = inWindow.reduce((n, c) => n + c.amountCents, 0);
+        const expected = from.balanceCents + contributed;
+        const diff = to.balanceCents - expected;
+        windows.push({
+          fromDate: from.date,
+          fromCents: from.balanceCents,
+          toDate: to.date,
+          toCents: to.balanceCents,
+          expectedCents: expected,
+          diffCents: diff,
+          txnSumCents: contributed,
+          txnCount: inWindow.length,
+          status: diff === 0 ? "ok" : "movement",
+          note: diff === 0 ? undefined : movementNote(diff, account.accountType),
+          issues: [],
+        });
+      }
+
+      if (contributions.length === 0 && anchors.length > 1) {
+        issues.push({
+          severity: "info",
+          message:
+            "Nothing is linked as a contribution to this account, so every move here reads as market movement.",
+          fix: "On the funding account's transaction, use “Moved to…” to point it at this account.",
+        });
+      }
+
+      return {
+        accountId: account.id,
+        accountName: account.name,
+        accountType: account.accountType,
+        accountKind: account.kind,
+        windows,
+        issues,
+        // Market movement is not a discrepancy — a balance account never fails
+        // to reconcile, it only reports what moved and why.
+        status: "ok" as const,
+      };
     }
 
     if (anchors.length === 0) {
@@ -397,13 +516,14 @@ export async function reconcileAccounts(
         issues.push({
           severity: "info",
           message: "No known balance for this account, so the running total is a change, not a balance.",
-          fix: "Set a balance below, or import a statement that carries one.",
+          fix: "Set a balance below, or close a month against a statement on Monthly Reconcile.",
         });
       }
       return {
         accountId: account.id,
         accountName: account.name,
         accountType: account.accountType,
+        accountKind: account.kind,
         windows: [],
         issues,
         status: "no_anchors" as const,
@@ -414,10 +534,6 @@ export async function reconcileAccounts(
     for (let i = 0; i < anchors.length; i++) {
       const to = anchors[i];
       const from = i === 0 ? null : anchors[i - 1];
-
-      // Balance-kind accounts hold no transactions — consecutive snapshots are
-      // just valuations moving with the market, nothing to reconcile.
-      if (account.kind === "balance") break;
 
       const inWindow = txns.filter(
         (t) => (from ? t.date > from.date : false) && t.date <= to.date,
@@ -465,11 +581,125 @@ export async function reconcileAccounts(
       accountId: account.id,
       accountName: account.name,
       accountType: account.accountType,
+      accountKind: account.kind,
       windows,
       issues,
       status: mismatched ? ("mismatch" as const) : ("ok" as const),
     };
   });
+}
+
+// --- per-row cleared state ---
+
+/**
+ * A period between two anchors, and whether the ledger explained it. Cleared
+ * state is *derived* from these rather than stored on the row: a transaction is
+ * reconciled because the period containing it ties out, so editing a row
+ * correctly un-reconciles its whole period instead of leaving a stale flag.
+ */
+export interface ClearedWindow {
+  /** exclusive — the anchor this period runs from */
+  fromDate: string;
+  /** inclusive — the anchor this period runs to */
+  toDate: string;
+  reconciles: boolean;
+}
+
+export type ClearedState =
+  /** inside a period whose statement balance the ledger explains exactly */
+  | "reconciled"
+  /** inside a period that does not tie out — something here is wrong */
+  | "mismatch"
+  /** before the first known balance, or after the last: nothing checks it yet */
+  | "open";
+
+/**
+ * Checked periods per account, for marking individual rows in the register.
+ *
+ * The window maths must stay identical to `reconcileAccounts` — same
+ * (previous anchor, this anchor] span, same `expected = from + activity`, same
+ * zero-diff test — or a row would claim to be reconciled while the account
+ * screen says the period is off. This reads per-date sums instead of whole
+ * transactions because the register calls it on every page load.
+ *
+ * Balance-kind accounts are skipped: they keep no ledger, so no row can be in
+ * one of their windows, and their windows measure contributions anyway.
+ */
+export async function clearedWindows(): Promise<Map<number, ClearedWindow[]>> {
+  const accounts = await db
+    .select({ id: schema.accounts.id })
+    .from(schema.accounts)
+    .where(eq(schema.accounts.kind, "transaction"));
+  const ids = accounts.map((a) => a.id);
+  if (ids.length === 0) return new Map();
+
+  const snapshots = await db
+    .select({
+      accountId: schema.balanceSnapshots.accountId,
+      date: schema.balanceSnapshots.date,
+      balanceCents: schema.balanceSnapshots.balanceCents,
+    })
+    .from(schema.balanceSnapshots)
+    .where(inArray(schema.balanceSnapshots.accountId, ids));
+  if (snapshots.length === 0) return new Map();
+
+  const dailyTotals = await db
+    .select({
+      accountId: schema.transactions.accountId,
+      date: schema.transactions.date,
+      total: sql<number>`coalesce(sum(${schema.transactions.amountCents}), 0)`,
+    })
+    .from(schema.transactions)
+    .where(inArray(schema.transactions.accountId, ids))
+    .groupBy(schema.transactions.accountId, schema.transactions.date);
+
+  const totalsByAccount = new Map<number, { date: string; total: number }[]>();
+  for (const row of dailyTotals) {
+    if (!totalsByAccount.has(row.accountId)) totalsByAccount.set(row.accountId, []);
+    totalsByAccount.get(row.accountId)!.push({ date: row.date, total: row.total });
+  }
+
+  const anchorsByAccount = new Map<number, { date: string; balanceCents: number }[]>();
+  for (const s of snapshots) {
+    if (!anchorsByAccount.has(s.accountId)) anchorsByAccount.set(s.accountId, []);
+    anchorsByAccount.get(s.accountId)!.push({
+      date: s.date,
+      balanceCents: s.balanceCents,
+    });
+  }
+
+  const result = new Map<number, ClearedWindow[]>();
+  for (const [accountId, rawAnchors] of anchorsByAccount) {
+    const anchors = [...rawAnchors].sort((a, b) => a.date.localeCompare(b.date));
+    const totals = totalsByAccount.get(accountId) ?? [];
+    const windows: ClearedWindow[] = [];
+    // The first anchor has nothing before it to measure against, so it opens no
+    // window — same as reconcileAccounts' `unanchored` first row.
+    for (let i = 1; i < anchors.length; i++) {
+      const from = anchors[i - 1];
+      const to = anchors[i];
+      const activity = totals
+        .filter((t) => t.date > from.date && t.date <= to.date)
+        .reduce((n, t) => n + t.total, 0);
+      windows.push({
+        fromDate: from.date,
+        toDate: to.date,
+        reconciles: to.balanceCents - (from.balanceCents + activity) === 0,
+      });
+    }
+    if (windows.length > 0) result.set(accountId, windows);
+  }
+  return result;
+}
+
+/** Where one row falls among its account's checked periods. */
+export function clearedStateFor(
+  windows: ClearedWindow[] | undefined,
+  date: string,
+): ClearedState {
+  const hit = windows?.find((w) => date > w.fromDate && date <= w.toDate);
+  if (!hit) return "open";
+  return hit.reconciles ? "reconciled" : "mismatch";
 }
 
 /** Set (or replace) a known balance by hand. */

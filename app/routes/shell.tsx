@@ -92,8 +92,9 @@ export function ErrorBoundary() {
 const TOOLBAR = [
   { to: "/", icon: "🗺️", label: "Dashboard", end: true, title: "Dashboard (accounting workflow overview)" },
   { to: "/transactions", icon: "📒", label: "Transactions", title: "Transactions (the household register)" },
-  { to: "/import", icon: "📥", label: "Statement Import", title: "Statement import (CSV and PDF statements)" },
-  { to: "/balances", icon: "🏦", label: "Account Balances", title: "Account balances (statement balances and reconciliation)" },
+  { to: "/import", icon: "📥", label: "Transaction Import", title: "Transaction import (CSV exports into the register)" },
+  { to: "/reconcile", icon: "⚖️", label: "Monthly Reconcile", title: "Monthly reconcile (close the books against PDF statements)" },
+  { to: "/balances", icon: "🏦", label: "Account Balances", title: "Account balances (known balances and reconciliation)" },
   { to: "/categories", icon: "🏷️", label: "Categories", title: "Categories (spending classes and category list)" },
   { to: "/transfers", icon: "⛴️", label: "Transfers", title: "Transfers (money moved between your own accounts)" },
   { to: "/amazon", icon: "📦", label: "Amazon Matching", title: "Amazon matching (match orders to card charges)" },
@@ -128,7 +129,8 @@ function buildMenus({
     {
       label: "File",
       items: [
-        { kind: "link", label: "Import Statements…", to: "/import" },
+        { kind: "link", label: "Import Transactions…", to: "/import" },
+        { kind: "link", label: "Reconcile a Month…", to: "/reconcile" },
         { kind: "link", label: "Backups & Restore…", to: "/backups" },
         { kind: "separator" },
         desktopOnly("Close Window", desktop.close),
@@ -159,11 +161,12 @@ function buildMenus({
     {
       label: "Tools",
       items: [
-        { kind: "link", label: "Statement Import", to: "/import" },
+        { kind: "link", label: "Transaction Import", to: "/import" },
         { kind: "link", label: "Transfer Detection", to: "/transfers" },
         { kind: "link", label: "Amazon Matching", to: "/amazon" },
         { kind: "separator" },
-        { kind: "link", label: "Reconcile Balances", to: "/balances" },
+        { kind: "link", label: "Monthly Reconcile", to: "/reconcile" },
+        { kind: "link", label: "Account Balances", to: "/balances" },
       ],
     },
     {

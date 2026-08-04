@@ -1,4 +1,41 @@
+import type { ClearedState } from "~/.server/balances";
 import type { SpendingClass } from "~/db/schema";
+
+const CLEARED_MARKS: Record<ClearedState, { mark: string; cls: string; title: string }> = {
+  reconciled: {
+    mark: "✓",
+    cls: "text-positive",
+    title: "Reconciled — the statement period this row falls in ties out exactly",
+  },
+  mismatch: {
+    mark: "!",
+    cls: "text-negative",
+    title:
+      "In a statement period that does not tie out — see Account Balances for what is off",
+  },
+  open: {
+    mark: "·",
+    cls: "text-gray-400",
+    title: "Not yet checked — no closed statement period covers this date",
+  },
+};
+
+/**
+ * Whether a row has been through a month-end close. Derived from the period it
+ * sits in rather than stored on the row, so it stays honest when a row changes.
+ */
+export function ClearedMark({ state }: { state: ClearedState }) {
+  const { mark, cls, title } = CLEARED_MARKS[state];
+  return (
+    <span
+      className={`font-mono text-[12px] font-bold ${cls}`}
+      title={title}
+      aria-label={title}
+    >
+      {mark}
+    </span>
+  );
+}
 
 export const CLASS_LABELS: Record<SpendingClass, string> = {
   base: "Base",
@@ -163,6 +200,43 @@ export function Amount({ cents, bold = false }: { cents: number; bold?: boolean 
         Math.abs(cents) / 100,
       )}
     </span>
+  );
+}
+
+/**
+ * Segmented progress bar, the 1999 kind. `max` of 0 renders an empty trough,
+ * which is what a run that hasn't been measured yet should look like.
+ */
+export function ProgressBar({
+  value,
+  max,
+  label,
+  className = "",
+}: {
+  value: number;
+  max: number;
+  label?: string;
+  className?: string;
+}) {
+  const pct = max > 0 ? Math.min(100, Math.max(0, (value / max) * 100)) : 0;
+  return (
+    <div
+      role="progressbar"
+      aria-valuenow={value}
+      aria-valuemin={0}
+      aria-valuemax={max}
+      aria-label={label}
+      className={`field-inset h-[14px] p-[2px] ${className}`}
+    >
+      <div
+        className="h-full transition-[width] duration-200 ease-linear"
+        style={{
+          width: `${pct}%`,
+          background:
+            "repeating-linear-gradient(90deg, var(--color-primary-600) 0 7px, transparent 7px 9px)",
+        }}
+      />
+    </div>
   );
 }
 

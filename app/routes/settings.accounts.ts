@@ -1,8 +1,8 @@
 import { data } from "react-router";
 import { eq, sql } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
-import { isAccountType, kindForAccountType } from "~/lib/accounts";
-import type { AccountType } from "~/db/schema";
+import { isAccountType, resolveAccountKind } from "~/lib/accounts";
+import type { AccountKind, AccountType } from "~/db/schema";
 import type { PaneActionResult } from "~/lib/panes";
 import type { Route } from "./+types/settings.accounts";
 
@@ -21,10 +21,11 @@ interface AccountFields {
   name: string;
   institution: string;
   accountType: AccountType;
+  kind: AccountKind;
   lastFour: string | null;
 }
 
-/** Name, institution, type and last four — shared by create and update. */
+/** Name, institution, type, tracking mode and last four — shared by create and update. */
 function readFields(
   form: FormData,
 ): { ok: true; fields: AccountFields } | { ok: false; error: string } {
@@ -39,7 +40,9 @@ function readFields(
   if (lastFour && !/^\d{4}$/.test(lastFour)) {
     return { ok: false, error: "Last four digits must be exactly four numbers." };
   }
-  return { ok: true, fields: { name, institution, accountType, lastFour } };
+  // Only loan types offer the choice; everything else is pinned by its type.
+  const kind = resolveAccountKind(accountType, form.get("kind"));
+  return { ok: true, fields: { name, institution, accountType, kind, lastFour } };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -54,7 +57,6 @@ export async function action({ request }: Route.ActionArgs) {
       .from(schema.accounts);
     await db.insert(schema.accounts).values({
       ...parsed.fields,
-      kind: kindForAccountType(parsed.fields.accountType),
       sortOrder: (max ?? 0) + 1,
     });
     return { ok: "create" } satisfies PaneActionResult;
@@ -66,12 +68,40 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "update") {
     const parsed = readFields(form);
     if (!parsed.ok) return fail(parsed.error);
+
+    // Switching an account to balance-only would strand any transactions it
+    // already holds — they would stop counting toward its balance while still
+    // sitting in reports. Make the user clear them out deliberately.
+    if (parsed.fields.kind === "balance") {
+      const [row] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.accountId, id));
+      if ((row?.count ?? 0) > 0) {
+        return fail(
+          `This account has ${row.count} imported transaction${row.count === 1 ? "" : "s"}. Delete them before switching it to balance-only tracking.`,
+        );
+      }
+    }
+
+    // The mirror image: transfers may name this account as their far side
+    // precisely because it keeps no ledger. Giving it one makes those links
+    // meaningless — the opposite legs should be imported and paired instead.
+    if (parsed.fields.kind === "transaction") {
+      const [row] = await db
+        .select({ count: sql<number>`count(*)` })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.transferAccountId, id));
+      if ((row?.count ?? 0) > 0) {
+        return fail(
+          `${row.count} transfer${row.count === 1 ? " names" : "s name"} this account as their far side, which only makes sense while it is balance-only. Unlink them before switching it to transaction tracking.`,
+        );
+      }
+    }
+
     const updated = await db
       .update(schema.accounts)
-      .set({
-        ...parsed.fields,
-        kind: kindForAccountType(parsed.fields.accountType),
-      })
+      .set(parsed.fields)
       .where(eq(schema.accounts.id, id))
       .returning({ id: schema.accounts.id });
     if (updated.length === 0) return fail("That account no longer exists.");
@@ -136,7 +166,7 @@ export async function action({ request }: Route.ActionArgs) {
       .from(schema.accounts)
       .where(eq(schema.accounts.id, id));
     if (!existing) return fail("That account no longer exists.");
-    const [txns, snapshots, batches] = await Promise.all([
+    const [txns, snapshots, batches, farSideLegs] = await Promise.all([
       countFor(schema.transactions),
       countFor(schema.balanceSnapshots),
       db
@@ -144,10 +174,22 @@ export async function action({ request }: Route.ActionArgs) {
         .from(schema.importBatches)
         .where(eq(schema.importBatches.accountId, id))
         .then(([row]) => row?.count ?? 0),
+      // A balance-only account can hold nothing of its own and still be the
+      // named far side of transfers sitting in other accounts.
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(schema.transactions)
+        .where(eq(schema.transactions.transferAccountId, id))
+        .then(([row]) => row?.count ?? 0),
     ]);
     if (txns > 0 || snapshots > 0 || batches > 0) {
       return fail(
         "That account has history attached. Archive it instead of deleting it.",
+      );
+    }
+    if (farSideLegs > 0) {
+      return fail(
+        `${farSideLegs} transfer${farSideLegs === 1 ? " is" : "s are"} linked to this account as their far side. Unlink them first, or archive the account instead.`,
       );
     }
     db.transaction((tx) => {

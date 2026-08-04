@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useFetcher } from "react-router";
 import { Button, Field, inputClass, selectClass } from "~/components/ui";
-import { ACCOUNT_TYPE_LABELS } from "~/lib/accounts";
+import {
+  ACCOUNT_KIND_LABELS,
+  ACCOUNT_TYPE_LABELS,
+  kindForAccountType,
+  supportsKindChoice,
+} from "~/lib/accounts";
 import type { PaneActionResult } from "~/lib/panes";
-import { ACCOUNT_TYPES, type Account } from "~/db/schema";
+import { ACCOUNT_KINDS, ACCOUNT_TYPES, type Account, type AccountType } from "~/db/schema";
 
 export const ACCOUNTS_ACTION = "/settings/accounts";
 
@@ -33,12 +38,14 @@ export function AccountsPane({ accounts }: { accounts: AccountPaneRow[] }) {
     {
       kind: "transaction" as const,
       title: "Transaction accounts",
-      blurb: "Checking, savings and credit cards — tracked transaction by transaction.",
+      blurb:
+        "Checking, savings, credit cards and lines of credit — tracked transaction by transaction.",
     },
     {
       kind: "balance" as const,
       title: "Balance-only accounts",
-      blurb: "Investment and retirement accounts — tracked by statement balances.",
+      blurb:
+        "Investments, retirement, mortgages and loans — tracked by statement balances.",
     },
   ];
 
@@ -116,15 +123,7 @@ export function AccountsPane({ accounts }: { accounts: AccountPaneRow[] }) {
           <Field label="Institution">
             <input name="institution" placeholder="Chase" className={inputClass} required />
           </Field>
-          <Field label="Type">
-            <select name="accountType" className={`${selectClass} w-full`}>
-              {ACCOUNT_TYPES.map((type) => (
-                <option key={type} value={type}>
-                  {ACCOUNT_TYPE_LABELS[type]}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <TypeAndTrackingFields />
           <Field label="Last four digits (optional)">
             <input
               name="lastFour"
@@ -148,6 +147,66 @@ export function AccountsPane({ accounts }: { accounts: AccountPaneRow[] }) {
 }
 
 type PaneFetcher = ReturnType<typeof useFetcher<PaneActionResult>>;
+
+/**
+ * Account type, plus the tracking mode where the type leaves it open. Most
+ * types imply their mode, so the second field only appears for debts — a HELOC
+ * usually has a statement worth importing, a mortgage usually just a balance.
+ */
+function TypeAndTrackingFields({
+  defaultType,
+  defaultKind,
+}: {
+  defaultType?: AccountType;
+  defaultKind?: Account["kind"];
+}) {
+  const [type, setType] = useState<AccountType>(defaultType ?? ACCOUNT_TYPES[0]);
+  const choosable = supportsKindChoice(type);
+
+  return (
+    <>
+      <Field label="Type">
+        <select
+          name="accountType"
+          value={type}
+          onChange={(e) => setType(e.target.value as AccountType)}
+          className={`${selectClass} w-full`}
+        >
+          {ACCOUNT_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {ACCOUNT_TYPE_LABELS[t]}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {choosable && (
+        <Field label="Tracking">
+          <select
+            name="kind"
+            defaultValue={
+              defaultType === type ? (defaultKind ?? kindForAccountType(type)) : kindForAccountType(type)
+            }
+            key={type}
+            className={`${selectClass} w-full`}
+          >
+            {ACCOUNT_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {ACCOUNT_KIND_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
+      {choosable && (
+        <p className="text-[11px] text-gray-600 sm:col-span-2">
+          Import transactions when you have a statement of draws and payments, as a line
+          of credit usually does. Track the balance only when all you record is what is
+          left owed — the payment out of your bank account stays an ordinary expense.
+        </p>
+      )}
+    </>
+  );
+}
 
 function AccountRow({
   account,
@@ -307,19 +366,7 @@ function EditForm({
           required
         />
       </Field>
-      <Field label="Type">
-        <select
-          name="accountType"
-          defaultValue={account.accountType}
-          className={`${selectClass} w-full`}
-        >
-          {ACCOUNT_TYPES.map((type) => (
-            <option key={type} value={type}>
-              {ACCOUNT_TYPE_LABELS[type]}
-            </option>
-          ))}
-        </select>
-      </Field>
+      <TypeAndTrackingFields defaultType={account.accountType} defaultKind={account.kind} />
       <Field label="Last four digits (optional)">
         <input
           name="lastFour"

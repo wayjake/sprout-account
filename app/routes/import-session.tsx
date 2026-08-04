@@ -32,6 +32,9 @@ export async function loader({ params }: Route.LoaderArgs) {
     where: eq(schema.importSessions.id, sessionId),
   });
   if (!session) throw data("Import not found", { status: 404 });
+  // A month-end close is reviewed on its own screen, which is the only one that
+  // knows what to do with a matched statement line.
+  if (session.purpose === "reconcile") throw redirect(`/reconcile/${sessionId}`);
 
   const batches = await db
     .select()
@@ -218,6 +221,20 @@ export async function action({ params, request }: Route.ActionArgs) {
         },
         { status: 400 },
       );
+    }
+    // Nothing to categorize (all duplicates, or a balances-only import) — the
+    // categorize screen would just be empty, so stay on the summary instead.
+    // Commit stats travel via query string since they only live in memory here
+    // (per-batch statsJson doesn't carry the session-wide transfer-link count).
+    if (result.stats.inserted > 0) {
+      const s = result.stats;
+      const qs = new URLSearchParams({
+        added: String(s.inserted),
+        balances: String(s.balancesRecorded),
+        skipped: String(s.skipped),
+        transfers: String(s.transfersLinked),
+      });
+      return redirect(`/import/session/${sessionId}/categorize?${qs}`);
     }
     return { committed: result.stats };
   }
@@ -480,7 +497,7 @@ export default function ImportSession({ loaderData, actionData }: Route.Componen
         <div className="bg-ledger p-3">
           <ReconcilePanel
             results={reconciliation}
-            emptyMessage="No known balances for these accounts yet, so there is nothing to check the transactions against. Import a statement that carries a closing balance, or set one by hand on the Account Balances page."
+            emptyMessage="No known balances for these accounts yet, so there is nothing to check the transactions against. Close a month against a statement on Monthly Reconcile, or set a balance by hand on the Account Balances page."
           />
         </div>
       </Card>

@@ -1,5 +1,6 @@
-import { and, desc, eq, isNull, like, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, lt, not, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
+import { clearedStateFor, clearedWindows, type ClearedWindow } from "~/.server/balances";
 import type { SpendingClass } from "~/db/schema";
 
 export const PAGE_SIZE = 50;
@@ -12,6 +13,8 @@ export interface TransactionFilters {
   from?: string;
   to?: string;
   q?: string;
+  /** "yes" — inside a period that ties out; "no" — everything else */
+  reconciled?: "yes" | "no";
 }
 
 export function parseTransactionFilters(url: URL): TransactionFilters {
@@ -36,7 +39,42 @@ export function parseTransactionFilters(url: URL): TransactionFilters {
       : undefined,
     to: /^\d{4}-\d{2}-\d{2}$/.test(p.get("to") ?? "") ? p.get("to")! : undefined,
     q: p.get("q")?.trim() || undefined,
+    reconciled:
+      p.get("reconciled") === "yes"
+        ? "yes"
+        : p.get("reconciled") === "no"
+          ? "no"
+          : undefined,
   };
+}
+
+/**
+ * Turn the derived cleared periods into a SQL predicate, so the filter narrows
+ * the query itself rather than the page — filtering after pagination would
+ * hand back short pages and a cursor that skips rows.
+ */
+function reconciledCondition(
+  windows: Map<number, ClearedWindow[]>,
+  mode: "yes" | "no",
+): SQL {
+  const t = schema.transactions;
+  const spans: SQL[] = [];
+  for (const [accountId, list] of windows) {
+    for (const w of list) {
+      if (!w.reconciles) continue;
+      spans.push(
+        and(
+          eq(t.accountId, accountId),
+          sql`${t.date} > ${w.fromDate}`,
+          sql`${t.date} <= ${w.toDate}`,
+        )!,
+      );
+    }
+  }
+  // Nothing reconciles yet: "yes" matches no row, "no" matches every row.
+  if (spans.length === 0) return mode === "yes" ? sql`0 = 1` : sql`1 = 1`;
+  const inAny = or(...spans)!;
+  return mode === "yes" ? inAny : not(inAny);
 }
 
 function filterConditions(f: TransactionFilters): SQL[] {
@@ -86,6 +124,12 @@ export async function listTransactions(
 ) {
   const t = schema.transactions;
   const conds = filterConditions(filters);
+  // Needed for the per-row marker whether or not the filter is on, so it is
+  // fetched once and used for both.
+  const windows = await clearedWindows();
+  if (filters.reconciled) {
+    conds.push(reconciledCondition(windows, filters.reconciled));
+  }
   if (cursor) {
     conds.push(
       or(
@@ -130,7 +174,10 @@ export async function listTransactions(
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
   return {
-    rows: page,
+    rows: page.map((r) => ({
+      ...r,
+      cleared: clearedStateFor(windows.get(r.accountId), r.date),
+    })),
     nextCursor:
       hasMore && last ? serializeCursor({ date: last.date, id: last.id }) : null,
   };
@@ -139,6 +186,40 @@ export async function listTransactions(
 export type TransactionListRow = Awaited<
   ReturnType<typeof listTransactions>
 >["rows"][number];
+
+/**
+ * Transactions inserted by a set of import batches, for the post-import
+ * categorize screen. Auto-linked transfer legs are excluded — they already
+ * carry a transfer-class category from `autoLinkTransfers` and drop out of
+ * income/spend reporting, so they don't belong in a categorization queue.
+ */
+export async function listImportedTransactions(batchIds: number[]) {
+  if (batchIds.length === 0) return [];
+  const t = schema.transactions;
+  return db
+    .select({
+      id: t.id,
+      date: t.date,
+      amountCents: t.amountCents,
+      description: t.description,
+      merchant: t.merchant,
+      categoryId: t.categoryId,
+      categorySource: t.categorySource,
+      accountId: t.accountId,
+      accountName: schema.accounts.name,
+      categoryName: schema.categories.name,
+      spendingClass: schema.categories.spendingClass,
+    })
+    .from(t)
+    .leftJoin(schema.accounts, eq(t.accountId, schema.accounts.id))
+    .leftJoin(schema.categories, eq(t.categoryId, schema.categories.id))
+    .where(and(inArray(t.importBatchId, batchIds), isNull(t.transferPeerId)))
+    .orderBy(desc(t.date), desc(t.id));
+}
+
+export type ImportedTransactionRow = Awaited<
+  ReturnType<typeof listImportedTransactions>
+>[number];
 
 // --- dashboard aggregates ---
 // "Effective" rows: splits replace their parent transaction so category/class

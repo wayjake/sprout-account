@@ -1,7 +1,7 @@
 import { Form, Link, data, redirect, useNavigation } from "react-router";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, isNull, or } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
-import { intakeFile, type IntakeResult } from "~/.server/import/intake";
+import { intakeTransactions, isPdf, type IntakeResult } from "~/.server/import/intake";
 import { createSession, dedupeSessionBatches } from "~/.server/import/stage";
 import { formatDateRange } from "~/lib/dates";
 import {
@@ -15,7 +15,7 @@ import {
 import type { Route } from "./+types/import";
 
 export function meta() {
-  return [{ title: "Statement Import · Sprout Account — Household Ledger" }];
+  return [{ title: "Transaction Import · Sprout Account — Household Ledger" }];
 }
 
 export async function loader(_: Route.LoaderArgs) {
@@ -43,6 +43,17 @@ export async function loader(_: Route.LoaderArgs) {
     })
     .from(schema.importBatches)
     .leftJoin(schema.accounts, eq(schema.importBatches.accountId, schema.accounts.id))
+    .leftJoin(
+      schema.importSessions,
+      eq(schema.importBatches.sessionId, schema.importSessions.id),
+    )
+    // Statements belong to a close, and have their own history on /reconcile.
+    .where(
+      or(
+        isNull(schema.importBatches.sessionId),
+        eq(schema.importSessions.purpose, "import"),
+      ),
+    )
     .orderBy(desc(schema.importBatches.id))
     .limit(25);
   return { accounts, batches };
@@ -61,6 +72,20 @@ export async function action({ request }: Route.ActionArgs) {
       { status: 400 },
     );
   }
+  // Refuse the whole upload rather than half of it: a statement here is a
+  // mistake about which screen you are on, not a bad file.
+  const pdfs = files.filter(isPdf);
+  if (pdfs.length > 0) {
+    return data(
+      {
+        error: `${pdfs.map((f) => f.name).join(", ")} ${
+          pdfs.length === 1 ? "is a PDF statement" : "are PDF statements"
+        }. Statements are read during a month-end close — take them to Monthly Reconcile.`,
+      },
+      { status: 400 },
+    );
+  }
+
   const defaultAccount = await db.query.accounts.findFirst({
     where: eq(schema.accounts.id, accountId),
   });
@@ -71,14 +96,12 @@ export async function action({ request }: Route.ActionArgs) {
     .from(schema.accounts)
     .where(eq(schema.accounts.isActive, true));
 
-  const session = await createSession();
+  const session = await createSession("import");
 
-  // Sequential: PDF extraction is an AI call per file and running them at once
-  // invites rate limits for no real gain on a handful of statements.
   const results: IntakeResult[] = [];
   for (const file of files) {
     results.push(
-      await intakeFile({ sessionId: session.id, file, defaultAccount, accounts }),
+      await intakeTransactions({ sessionId: session.id, file, defaultAccount, accounts }),
     );
   }
 
@@ -128,11 +151,13 @@ export default function Import({ loaderData, actionData }: Route.ComponentProps)
   return (
     <div className="max-w-3xl space-y-6">
       <div>
-        <h1 className="text-[16px] font-bold text-primary-950">📥 Statement Import</h1>
+        <h1 className="text-[16px] font-bold text-primary-950">📥 Transaction Import</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Upload as many files as you like at once — statements and transaction
-          exports together. Statements carry their closing balance, so the two are
-          checked against each other before anything touches your books.
+          Transaction exports from your bank — upload as many as you like at once. This is
+          how rows get into the register.{" "}
+          <Link to="/reconcile" className="font-medium text-primary-600 hover:underline">
+            PDF statements are read during a month-end close →
+          </Link>
         </p>
       </div>
 
@@ -143,7 +168,7 @@ export default function Import({ loaderData, actionData }: Route.ComponentProps)
       )}
 
       <Card>
-        <CardHeader title="Upload statements" />
+        <CardHeader title="Upload transaction exports" />
         <Form method="post" encType="multipart/form-data" className="space-y-3 p-4">
           <div className="flex items-end gap-3">
             <Field label="Default account">
@@ -156,12 +181,12 @@ export default function Import({ loaderData, actionData }: Route.ComponentProps)
                 ))}
               </select>
             </Field>
-            <Field label="Files (.csv or .pdf — pick several)">
+            <Field label="Files (.csv — pick several)">
               <input
                 type="file"
                 name="files"
                 multiple
-                accept=".csv,.txt,.pdf,application/pdf,text/csv"
+                accept=".csv,.txt,text/csv"
                 required
                 className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-primary-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary-800 hover:file:bg-primary-200"
               />
@@ -171,17 +196,11 @@ export default function Import({ loaderData, actionData }: Route.ComponentProps)
             </Button>
           </div>
           <p className="text-xs text-gray-500">
-            Each file is matched to an account by its filename or the account number
-            printed on the statement — the default above is the fallback, and you can
-            change any of it on the next screen.
+            Each file is matched to an account by its filename — the default above is the
+            fallback, and you can change it on the next screen. A file's columns are asked
+            about once per account and remembered after that.
           </p>
         </Form>
-        {uploading && (
-          <p className="px-4 pb-4 text-xs text-gray-500">
-            PDF statements are sent to the AI for extraction — with several files this
-            can take a few minutes.
-          </p>
-        )}
       </Card>
 
       <Card>

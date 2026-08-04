@@ -1,9 +1,12 @@
-import { ACCOUNT_TYPES, type AccountType } from "~/db/schema";
+import { ACCOUNT_KINDS, ACCOUNT_TYPES, type AccountKind, type AccountType } from "~/db/schema";
 
 export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   checking: "Checking",
   savings: "Savings",
   credit_card: "Credit card",
+  line_of_credit: "Line of credit",
+  mortgage: "Mortgage",
+  loan: "Loan",
   investment: "Investment",
   retirement: "Retirement",
   other: "Other",
@@ -13,15 +16,74 @@ export function isAccountType(value: unknown): value is AccountType {
   return typeof value === "string" && (ACCOUNT_TYPES as readonly string[]).includes(value);
 }
 
+export function isAccountKind(value: unknown): value is AccountKind {
+  return typeof value === "string" && (ACCOUNT_KINDS as readonly string[]).includes(value);
+}
+
 /**
- * Investment and retirement accounts are tracked by balance snapshots from
- * statements; everything else is tracked transaction by transaction. The
- * account's `kind` is derived from its type, never chosen separately.
+ * Account types where the household owes money rather than owns it. Their
+ * balances are negative, and a positive transaction is a payment or a credit
+ * coming off the debt — never income.
  */
-export function kindForAccountType(accountType: AccountType) {
-  return accountType === "investment" || accountType === "retirement"
-    ? ("balance" as const)
-    : ("transaction" as const);
+const LIABILITY_TYPES = new Set<AccountType>([
+  "credit_card",
+  "line_of_credit",
+  "mortgage",
+  "loan",
+]);
+
+export function isLiability(accountType: AccountType): boolean {
+  return LIABILITY_TYPES.has(accountType);
+}
+
+/**
+ * Whether the account's tracking mode is the user's to pick.
+ *
+ * Most types have one sensible answer: a chequing account is always a ledger
+ * of transactions, an IRA is always a series of valuations. Debts are the
+ * exception — a HELOC statement reads like a credit card and is worth
+ * importing row by row, while a mortgage is usually just a principal balance
+ * you record once a month. Both are legitimate, so loans ask.
+ */
+export function supportsKindChoice(accountType: AccountType): boolean {
+  return accountType === "mortgage" || accountType === "loan" || accountType === "line_of_credit";
+}
+
+/**
+ * The tracking mode for a type: investment and retirement accounts are tracked
+ * by balance snapshots, ordinary spending accounts transaction by transaction.
+ * For loans this is only the default — see `supportsKindChoice`.
+ */
+export function kindForAccountType(accountType: AccountType): AccountKind {
+  if (accountType === "investment" || accountType === "retirement") return "balance";
+  // An amortizing debt normally arrives as a monthly principal figure; a
+  // revolving one arrives as a statement of draws and payments.
+  if (accountType === "mortgage" || accountType === "loan") return "balance";
+  return "transaction";
+}
+
+/** Resolve the tracking mode to store, honouring the user's pick where the type allows one. */
+export function resolveAccountKind(
+  accountType: AccountType,
+  requested: unknown,
+): AccountKind {
+  if (supportsKindChoice(accountType) && isAccountKind(requested)) return requested;
+  return kindForAccountType(accountType);
+}
+
+export const ACCOUNT_KIND_LABELS: Record<AccountKind, string> = {
+  transaction: "Import transactions",
+  balance: "Track balance only",
+};
+
+/**
+ * The transfer category that fits a payment into this account — what the two
+ * legs of a linked pair get named. Null for types that are not debts.
+ */
+export function paymentCategoryName(accountType: AccountType): string | null {
+  if (accountType === "credit_card") return "Credit Card Payment";
+  if (isLiability(accountType)) return "Loan Payment";
+  return null;
 }
 
 /** "Chase · Checking ··1234" — the human label for an account, used in
