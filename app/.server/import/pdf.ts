@@ -1,9 +1,13 @@
 import { z } from "zod";
 import { chatJSON, pdfModel } from "~/.server/openrouter";
+import { mapWithConcurrency, splitPdfPages, type PdfChunk } from "~/.server/import/pdf-split";
 import { ACCOUNT_TYPE_LABELS, isLiability } from "~/lib/accounts";
-import { parseCentsString } from "~/lib/money";
+import { formatCents, parseCentsString } from "~/lib/money";
 import { addDays } from "~/lib/dates";
 import type { AccountKind, AccountType } from "~/db/schema";
+
+/** Chunk requests in flight at once — see `mapWithConcurrency`. */
+const CHUNK_CONCURRENCY = 3;
 
 const ExtractionSchema = z.object({
   statementStart: z.string().nullable(),
@@ -29,7 +33,13 @@ const ExtractionSchema = z.object({
 });
 
 export interface PdfExtractionResult {
-  transactions: { date: string; description: string; amountCents: number }[];
+  transactions: {
+    date: string;
+    description: string;
+    amountCents: number;
+    /** The date the statement printed, when it differs from `date` — see the clamp below */
+    matchDate?: string;
+  }[];
   balances: { date: string; balanceCents: number; kind: string }[];
   statementStart: string | null;
   statementEnd: string | null;
@@ -48,11 +58,58 @@ export async function extractFromPdf(
   filename: string,
   account: { kind: AccountKind; accountType: AccountType },
 ): Promise<PdfExtractionResult> {
+  const chunks = await splitPdfPages(buffer);
+  const raws = await mapWithConcurrency(chunks, CHUNK_CONCURRENCY, (chunk) =>
+    extractChunk(chunk, chunks.length, filename, account),
+  );
+  // Deliberately one pass. A merged statement that fails the tie-out check
+  // below is not a dice roll worth repeating: every failure observed was
+  // structural — signs flipped on a statement thick with returns — and a second
+  // pass reproduced it while doubling the work for exactly the longest
+  // statements, the ones most likely to fail. The discrepancy is reported on
+  // the close screen instead, where it can be looked at.
+  return finalize(mergeRaw(raws), account);
+}
+
+type RawExtraction = z.infer<typeof ExtractionSchema>;
+
+/**
+ * Fold the chunks back into the shape a single request would have produced, so
+ * everything downstream is unaware the statement was ever split. Transactions
+ * concatenate in page order, which is document order. The period, the account
+ * number and the balances are printed once, on the first page that carries
+ * them, so the first chunk to report each wins — a later chunk repeating a
+ * figure out of a running total cannot displace the printed one.
+ */
+function mergeRaw(raws: RawExtraction[]): RawExtraction {
+  const balances: RawExtraction["balances"] = [];
+  for (const kind of ["opening", "closing"]) {
+    const hit = raws
+      .flatMap((r) => r.balances)
+      .find((b) => (b.kind?.toLowerCase() === "opening" ? "opening" : "closing") === kind);
+    if (hit) balances.push(hit);
+  }
+  return {
+    statementStart: raws.find((r) => r.statementStart)?.statementStart ?? null,
+    statementEnd: raws.find((r) => r.statementEnd)?.statementEnd ?? null,
+    accountLastFour: raws.find((r) => r.accountLastFour)?.accountLastFour ?? null,
+    transactions: raws.flatMap((r) => r.transactions),
+    balances,
+  };
+}
+
+async function extractChunk(
+  chunk: PdfChunk,
+  chunkCount: number,
+  filename: string,
+  account: { kind: AccountKind; accountType: AccountType },
+): Promise<RawExtraction> {
   const balanceOnly = account.kind === "balance";
   const owed = isLiability(account.accountType);
   const kindNoun = ACCOUNT_TYPE_LABELS[account.accountType].toLowerCase();
+  const split = chunkCount > 1;
 
-  const raw = await chatJSON({
+  return chatJSON({
     model: pdfModel(),
     system: `You extract data from financial statements with perfect accuracy.
 
@@ -72,6 +129,12 @@ ${
        : ""
    }
    - Skip running-balance columns, summary lines, subtotals and totals — individual transactions only.
+   - A rewards figure printed on an ordinary purchase row — a rate and an amount such as "1%  $0.10" sitting in a Daily Cash or Rewards column beside the transaction amount — is cash back earned on that purchase. It belongs to that row and is NEVER a row of its own.
+   - Indented sub-lines beneath a transaction are usually rewards *earned* (cash back, points, "3% Daily Cash at X", bonus offers). Those are not transactions — skip them. The exception is a reward *reversal* on a return or credit: a line whose own text names it an adjustment or reversal, such as a "Daily Cash Adjustment" shown at a negative rate under a return. That money is taken back from the account, so include it as its own row, dated like the line it sits under. Only a line that literally reads as an adjustment qualifies — never promote an earned-rewards figure into one. It is a charge, never a credit${
+     owed
+       ? `, so it must be NEGATIVE — a "Daily Cash Adjustment" of $0.26 printed under a $26.46 return is reported as "-0.26", even though the return above it is positive`
+       : ""
+   }.
 
 2. The statement's opening and closing balances, into the balances array.
    - One entry with kind "opening" dated the first day of the statement period, one with kind "closing" dated the last day.
@@ -85,20 +148,48 @@ ${
 }
 - Dates must be YYYY-MM-DD. Infer the year from the statement period when a line omits it.
 - statementStart/statementEnd: the statement period dates if shown, else null.
-- accountLastFour: the last four digits of the account number if printed, else null.`,
+- accountLastFour: the last four digits of the account number if printed, else null.${
+      split
+        ? `
+
+You are being shown PAGES ${chunk.firstPage}–${chunk.lastPage} of a longer statement, not the whole document.
+- Extract each row printed on these pages exactly once. The pages you cannot see are covered by their own extract, so never reach for a row that is not here, and never invent or repeat one — a row that does not appear on these pages is not missing, it is simply somebody else's.
+- Balances, the statement period and the account number are printed once, usually on page 1. If these pages do not show them, return an empty balances array and null for the period and the account number. Do not infer a balance from a running total and never compute one.
+- Page footers, repeated column headers, section totals and a rewards summary are not transactions.`
+        : ""
+    }`,
     user: [
-      { type: "text", text: `Extract from this statement (${filename}).` },
+      {
+        type: "text",
+        text: split
+          ? `Extract from pages ${chunk.firstPage}–${chunk.lastPage} of this statement (${filename}).`
+          : `Extract from this statement (${filename}).`,
+      },
       {
         type: "file",
         file: {
           filename,
-          file_data: `data:application/pdf;base64,${buffer.toString("base64")}`,
+          file_data: `data:application/pdf;base64,${chunk.buffer.toString("base64")}`,
         },
       },
     ],
     schema: ExtractionSchema,
     schemaName: "statement_extraction",
   });
+}
+
+/**
+ * Turn a merged raw extraction into the result the import pipeline consumes:
+ * parse money and dates, place the anchors, pull stray rows into the period,
+ * and check the whole thing against the balances the statement printed.
+ */
+function finalize(
+  raw: RawExtraction,
+  account: { kind: AccountKind; accountType: AccountType },
+): PdfExtractionResult {
+  const balanceOnly = account.kind === "balance";
+  const owed = isLiability(account.accountType);
+  const kindNoun = ACCOUNT_TYPE_LABELS[account.accountType].toLowerCase();
 
   const problems: string[] = [];
   const isoDate = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -140,6 +231,70 @@ ${
     const date =
       kind === "opening" && periodStart && b.date === periodStart ? addDays(b.date, -1) : b.date;
     balances.push({ date, balanceCents, kind });
+  }
+
+  const openingAnchor = balances.find((b) => b.kind === "opening");
+
+  // A card that dates its lines by *transaction* date while striking its
+  // balances by *posting* date prints rows older than the period they belong
+  // to: an Apple Card statement for Jul 1–31 lists the Jun 30 purchases that
+  // posted on Jul 1, which the "as of Jun 30" opening balance rightly excludes.
+  // Left alone those rows sit on or before the opening anchor, fall outside the
+  // `(opening, closing]` window every downstream check uses, and the period
+  // reports a gap the size of their sum while the extraction itself ties out
+  // perfectly. The statement is the authority on which period a line belongs
+  // to, so pull a stray row forward to the first day the window covers.
+  //
+  // The boundary is the anchor's own day + 1, not the printed period start:
+  // those coincide on a normal statement, but deriving it from the anchor is
+  // what guarantees a clamped row can never land back outside the window and
+  // trip the stranded-row check below. Only the near end ever spills — a
+  // statement's last line is always inside its period — so this cannot reach
+  // into the next month. The printed date rides along as `matchDate`, so the
+  // ledger is still matched on what the statement actually said and a multi-day
+  // pull can't push a row past `STATEMENT_MATCH_WINDOW_DAYS` and offer an
+  // already-recorded charge as missing.
+  const windowStart = openingAnchor ? addDays(openingAnchor.date, 1) : statementStart;
+  if (windowStart) {
+    for (const t of transactions) {
+      if (t.date < windowStart) {
+        t.matchDate = t.date;
+        t.date = windowStart;
+      }
+    }
+  }
+
+  // A statement is self-checking: the lines it prints must account for exactly
+  // the distance between the two balances it prints. AI extraction of a long
+  // statement drops and mis-signs the odd row, and neither shows up anywhere
+  // downstream — the close just quietly fails to reconcile, and `diagnose` then
+  // blames the ledger for a gap the import invented. Do the arithmetic here,
+  // where the printed answer is still at hand, and refuse to be silent about it.
+  const opening = openingAnchor;
+  const closing = balances.find((b) => b.kind === "closing");
+  if (!balanceOnly && opening && closing && transactions.length > 0) {
+    const net = transactions.reduce((n, t) => n + t.amountCents, 0);
+    const expected = closing.balanceCents - opening.balanceCents;
+    if (net !== expected) {
+      problems.push(
+        `These rows do not tie out to the printed balances: ${transactions.length} transactions net ${formatCents(net)}, but the balances move ${formatCents(expected)} — off by ${formatCents(net - expected)}. A line was missed or given the wrong sign; check before committing.`,
+      );
+    }
+
+    // Tying out is not enough: a row can carry the right amount and a date the
+    // period never covers — a misread year is the usual cause — and it then
+    // lands outside `(opening, closing]` and goes uncounted no matter how well
+    // the totals agree. The clamp above rescues rows that fall short of the
+    // period; nothing rescues one that falls past its end, so say so here.
+    const stranded = transactions.filter(
+      (t) => t.date <= opening.date || t.date > closing.date,
+    );
+    if (stranded.length > 0) {
+      const dates = [...new Set(stranded.map((t) => t.date))].sort();
+      problems.push(
+        `${stranded.length} transaction${stranded.length === 1 ? " falls" : "s fall"} outside the period this statement covers (${opening.date} → ${closing.date}) and will not count toward it: ${dates.slice(0, 5).join(", ")}${dates.length > 5 ? `, +${dates.length - 5} more` : ""}. Check the dates before committing.`,
+      );
+    }
   }
 
   // A debt statement whose balances came back positive almost certainly lost a

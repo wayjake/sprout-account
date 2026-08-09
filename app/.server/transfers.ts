@@ -186,25 +186,42 @@ export async function linkTransferPair(
     return "One of these is already linked to a transfer";
 
   const categoryId = await transferCategoryId(a.account, b.account);
-  db.transaction((tx) => {
-    tx.update(schema.transactions)
+  const [lo, hi] = a.id < b.id ? [a.id, b.id] : [b.id, a.id];
+  await db.transaction(async (tx) => {
+    await tx.update(schema.transactions)
       .set({ transferPeerId: b.id, categoryId, categorySource: source })
       .where(eq(schema.transactions.id, a.id))
       .run();
-    tx.update(schema.transactions)
+    await tx.update(schema.transactions)
       .set({ transferPeerId: a.id, categoryId, categorySource: source })
       .where(eq(schema.transactions.id, b.id))
       .run();
+    // A pair the user links by hand is no longer a dismissed suggestion —
+    // otherwise unlinking later would leave it permanently un-suggestable.
+    if (source === "user") {
+      await tx.delete(schema.transferRejections)
+        .where(
+          and(
+            eq(schema.transferRejections.txnAId, lo),
+            eq(schema.transferRejections.txnBId, hi),
+          ),
+        )
+        .run();
+    }
   });
   return null;
 }
 
-/**
- * Balance-only accounts a transaction can name as its far side. These keep no
- * ledger of their own, so a transfer into or out of one never has a second row
- * to pair with — the link points at the account instead.
- */
-export async function balanceTransferTargets() {
+export interface TransferTargetAccount {
+  id: number;
+  name: string;
+  institution: string | null;
+  accountType: schema.Account["accountType"];
+}
+
+async function activeAccountsOfKind(
+  kind: schema.Account["kind"],
+): Promise<TransferTargetAccount[]> {
   return db
     .select({
       id: schema.accounts.id,
@@ -213,13 +230,100 @@ export async function balanceTransferTargets() {
       accountType: schema.accounts.accountType,
     })
     .from(schema.accounts)
-    .where(
-      and(
-        eq(schema.accounts.kind, "balance"),
-        eq(schema.accounts.isActive, true),
-      ),
-    )
+    .where(and(eq(schema.accounts.kind, kind), eq(schema.accounts.isActive, true)))
     .orderBy(schema.accounts.sortOrder, schema.accounts.name);
+}
+
+/**
+ * Balance-only accounts a transaction can name as its far side. These keep no
+ * ledger of their own, so a transfer into or out of one never has a second row
+ * to pair with — the link points at the account instead.
+ */
+export async function balanceTransferTargets() {
+  return activeAccountsOfKind("balance");
+}
+
+/**
+ * Accounts that keep their own transactions, minus the one this row lives in.
+ * The far side here is a *row*, not the account: naming the account instead
+ * would count the movement twice, since `reconcileAccounts` folds every
+ * `transferAccountId` leg in as a contribution to the account it names.
+ */
+export async function pairTransferTargets(excludeAccountId: number) {
+  const accounts = await activeAccountsOfKind("transaction");
+  return accounts.filter((a) => a.id !== excludeAccountId);
+}
+
+/**
+ * How far out a hand-made pair search looks. Wider than `TRANSFER_WINDOW_DAYS`
+ * because the automatic window guards a guess, while this one only decides
+ * which rows are worth showing a user who is naming the far side themselves.
+ */
+export const MANUAL_TRANSFER_WINDOW_DAYS = 60;
+
+/** Cap per account — a round amount like -20.00 can match a great many rows. */
+const MANUAL_CANDIDATES_PER_ACCOUNT = 25;
+
+export interface ManualPeerCandidate extends TransferLeg {
+  /** What this row is filed as today; linking overwrites it. */
+  categoryName: string | null;
+  dayDiff: number;
+}
+
+/**
+ * Rows in other transaction-keeping accounts that could be this one's opposite
+ * leg, for the manual picker. Deliberately looser than `rawCandidatePairs`:
+ * the wide window, and no filter on the row's current category or on past
+ * dismissals — a user pointing at a specific row is overriding all three of
+ * those guesses. Equal-and-opposite stays, because `linkTransferPair` drops
+ * both legs out of reporting and mismatched legs would lose the difference.
+ */
+export async function manualPeerCandidates(
+  txnId: number,
+): Promise<ManualPeerCandidate[]> {
+  const rows = await db.all<{
+    id: number;
+    date: string;
+    amount_cents: number;
+    description: string;
+    account_id: number;
+    account_name: string;
+    category_name: string | null;
+    day_diff: number;
+  }>(sql`
+    select * from (
+      select t.id, t.date, t.amount_cents, t.description,
+             t.account_id, a.name as account_name, c.name as category_name,
+             abs(julianday(t.date) - julianday(s.date)) as day_diff,
+             row_number() over (
+               partition by t.account_id
+               order by abs(julianday(t.date) - julianday(s.date)) asc, t.id desc
+             ) as rn
+      from transactions t
+      join transactions s on s.id = ${txnId}
+      join accounts a on a.id = t.account_id
+      left join categories c on c.id = t.category_id
+      where t.account_id != s.account_id
+        and t.amount_cents = -s.amount_cents
+        and t.transfer_peer_id is null
+        and t.transfer_account_id is null
+        and a.kind = 'transaction'
+        and a.is_active = 1
+        and abs(julianday(t.date) - julianday(s.date)) <= ${MANUAL_TRANSFER_WINDOW_DAYS}
+    )
+    where rn <= ${MANUAL_CANDIDATES_PER_ACCOUNT}
+    order by day_diff asc, date desc, id desc
+  `);
+  return rows.map((r) => ({
+    id: r.id,
+    date: r.date,
+    amountCents: r.amount_cents,
+    description: r.description,
+    accountId: r.account_id,
+    accountName: r.account_name,
+    categoryName: r.category_name,
+    dayDiff: Math.round(r.day_diff),
+  }));
 }
 
 /**
@@ -309,12 +413,12 @@ export async function unlinkTransfer(txnId: number): Promise<number | null> {
   });
   if (!txn?.transferPeerId) return null;
   const peerId = txn.transferPeerId;
-  db.transaction((tx) => {
-    tx.update(schema.transactions)
+  await db.transaction(async (tx) => {
+    await tx.update(schema.transactions)
       .set({ transferPeerId: null })
       .where(eq(schema.transactions.id, txnId))
       .run();
-    tx.update(schema.transactions)
+    await tx.update(schema.transactions)
       .set({ transferPeerId: null })
       .where(eq(schema.transactions.id, peerId))
       .run();

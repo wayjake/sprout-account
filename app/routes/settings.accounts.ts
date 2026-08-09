@@ -140,13 +140,13 @@ export async function action({ request }: Route.ActionArgs) {
     // current visible order first, then swap the two positions.
     const order = siblings.map((s) => s.id);
     [order[at], order[at + direction]] = [order[at + direction], order[at]];
-    db.transaction((tx) => {
-      order.forEach((accountId, index) => {
-        tx.update(schema.accounts)
+    await db.transaction(async (tx) => {
+      for (const [index, accountId] of order.entries()) {
+        await tx.update(schema.accounts)
           .set({ sortOrder: index + 1 })
           .where(eq(schema.accounts.id, accountId))
           .run();
-      });
+      }
     });
     return { ok: "move" } satisfies PaneActionResult;
   }
@@ -192,10 +192,10 @@ export async function action({ request }: Route.ActionArgs) {
         `${farSideLegs} transfer${farSideLegs === 1 ? " is" : "s are"} linked to this account as their far side. Unlink them first, or archive the account instead.`,
       );
     }
-    db.transaction((tx) => {
+    await db.transaction(async (tx) => {
       // Saved CSV column mappings are the only other rows pointing at it.
-      tx.delete(schema.csvMappings).where(eq(schema.csvMappings.accountId, id)).run();
-      tx.delete(schema.accounts).where(eq(schema.accounts.id, id)).run();
+      await tx.delete(schema.csvMappings).where(eq(schema.csvMappings.accountId, id)).run();
+      await tx.delete(schema.accounts).where(eq(schema.accounts.id, id)).run();
     });
     return { ok: "delete" } satisfies PaneActionResult;
   }

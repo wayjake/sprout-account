@@ -12,6 +12,7 @@ import {
   CardHeader,
   EmptyState,
   Field,
+  fileInputClass,
   selectClass,
 } from "~/components/ui";
 import { formatDateRange } from "~/lib/dates";
@@ -154,7 +155,7 @@ export default function Reconcile({ loaderData, actionData }: Route.ComponentPro
                 multiple
                 accept=".pdf,application/pdf"
                 required
-                className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-primary-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary-800 hover:file:bg-primary-200"
+                className={fileInputClass}
               />
             </Field>
             <Button type="submit" disabled={uploading}>
@@ -212,10 +213,17 @@ export default function Reconcile({ loaderData, actionData }: Route.ComponentPro
                   <p className="font-medium text-gray-900">
                     {h.periodStart && h.periodEnd
                       ? formatDateRange(h.periodStart, h.periodEnd)
-                      : "No period detected"}
-                    <span className="ml-2 text-xs font-normal text-gray-500">
-                      {h.statements} statement{h.statements === 1 ? "" : "s"}
-                    </span>
+                      : // A session row is written before its statements are
+                        // extracted, so an open close with no batches yet is a
+                        // read still in flight — not a statement without a period.
+                        h.statements === 0 && h.status === "open"
+                        ? "Reading statements…"
+                        : "No period detected"}
+                    {!(h.statements === 0 && h.status === "open") && (
+                      <span className="ml-2 text-xs font-normal text-gray-500">
+                        {h.statements} statement{h.statements === 1 ? "" : "s"}
+                      </span>
+                    )}
                   </p>
                   <p className="text-xs text-gray-500">
                     {h.accounts.join(", ") || "—"} ·{" "}

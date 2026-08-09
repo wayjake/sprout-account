@@ -494,11 +494,11 @@ export async function applyItemSplits(transactionId: number): Promise<string | n
     return "Assign categories to the order items first (or categorize the transaction).";
   }
 
-  db.transaction((tx) => {
-    tx.delete(schema.transactionSplits)
+  await db.transaction(async (tx) => {
+    await tx.delete(schema.transactionSplits)
       .where(eq(schema.transactionSplits.transactionId, transactionId))
       .run();
-    tx.insert(schema.transactionSplits)
+    await tx.insert(schema.transactionSplits)
       .values(rows as (typeof schema.transactionSplits.$inferInsert)[])
       .run();
   });

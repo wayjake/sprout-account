@@ -12,14 +12,19 @@ export default [
     // which keeps the screen underneath mounted while a pane is open.
     layout("routes/settings-pane.tsx", [
       index("routes/dashboard.tsx"),
-      route("transactions", "routes/transactions.tsx"),
-      route("transactions/:id", "routes/transaction-detail.tsx"),
+      // The detail screen is a child of the register, not a page of its own:
+      // it opens as a modal over the list, which keeps the register's filters,
+      // scroll and pagination alive underneath. The cost is that the register's
+      // loader runs for every `/transactions/:id` hit, including deep links
+      // from other screens — one page of rows and a count.
+      route("transactions", "routes/transactions.tsx", [
+        route(":id", "routes/transaction-detail.tsx"),
+      ]),
       route("transfers", "routes/transfers.tsx"),
       // Transaction exports (.csv) come in here…
       ...prefix("import", [
         index("routes/import.tsx"),
         route("session/:sessionId", "routes/import-session.tsx"),
-        route("session/:sessionId/categorize", "routes/import-session-categorize.tsx"),
         route(":batchId/map", "routes/import-map.tsx"),
         route(":batchId", "routes/import-review.tsx"),
       ]),
@@ -38,4 +43,10 @@ export default [
   route("settings/accounts", "routes/settings.accounts.ts"),
   route("accounts", "routes/accounts.ts"),
   route("api/ai/categorize", "routes/api.ai-categorize.ts"),
+  // Categorization rules download — the response is the file, so it can't be
+  // a loader on the Backups screen (that loader feeds the page).
+  route("api/rules/export", "routes/api.rules-export.ts"),
+  // Bulk edits from the register's selection. Action-only, and outside the
+  // layouts above so a submission doesn't run the shell and pane loaders.
+  route("api/transactions/bulk", "routes/api.transactions-bulk.ts"),
 ] satisfies RouteConfig;

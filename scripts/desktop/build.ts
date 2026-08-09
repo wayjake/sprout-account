@@ -47,7 +47,7 @@ console.log(`✓ asset manifest: ${files.length} files`);
 const tmpDb = path.join(os.tmpdir(), `sprout-schema-${Date.now()}.db`);
 await $`npx drizzle-kit push --force`
   .cwd(ROOT)
-  .env({ ...process.env, DATABASE_PATH: tmpDb })
+  .env({ ...process.env, DATABASE_PATH: tmpDb, SPROUT_LOCAL_SCHEMA_DUMP: "1" })
   .quiet();
 const schemaSql = await $`sqlite3 ${tmpDb} .schema`.text();
 const cleanedSchema = schemaSql

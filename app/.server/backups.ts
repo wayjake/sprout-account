@@ -1,7 +1,32 @@
+import { createClient } from "@libsql/client";
+import { sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/libsql";
 import fs from "node:fs";
 import path from "node:path";
-import { db, dbPath, rawSqlite, schema, withDbClosed } from "~/.server/db";
+import { db, dbPath, rawClient, schema } from "~/.server/db";
 import { STARTER_CATEGORIES } from "~/db/starter-categories";
+
+/**
+ * Every table that holds real household data, in an order that happens to be
+ * FK-safe for delete (children before parents) — though with
+ * `defer_foreign_keys` on, order stops mattering; see `restoreBackup`.
+ */
+const DATA_TABLES = [
+  schema.amazonMatches,
+  schema.amazonOrderItems,
+  schema.amazonOrders,
+  schema.transferRejections,
+  schema.transactionSplits,
+  schema.stagedRows,
+  schema.transactions,
+  schema.balanceSnapshots,
+  schema.csvMappings,
+  schema.merchantMemory,
+  schema.importBatches,
+  schema.importSessions,
+  schema.categories,
+  schema.accounts,
+] as const;
 
 /**
  * Backups are plain SQLite files in data/backups/, named by convention:
@@ -66,7 +91,7 @@ export async function createBackup(label: string): Promise<string> {
   fs.mkdirSync(BACKUPS_DIR, { recursive: true });
   const filename = `${timestamp()}__${sanitizeLabel(label)}.db`;
   const target = path.join(BACKUPS_DIR, filename).replace(/'/g, "''");
-  rawSqlite().exec(`VACUUM INTO '${target}'`);
+  await rawClient().execute(`VACUUM INTO '${target}'`);
   return filename;
 }
 
@@ -84,8 +109,16 @@ function isSqliteFile(filePath: string): boolean {
 
 /**
  * Replace the live database with a backup. A "pre-restore" safety backup of
- * the current state is taken first; WAL/SHM sidecars are removed so the
- * restored file is opened cleanly.
+ * the current state is taken first.
+ *
+ * Under Turso, the live db is an embedded replica — the local file carries
+ * replication metadata tied to the primary, so it can no longer just be
+ * swapped for the backup file wholesale (that would desync the replica, not
+ * restore it). Instead the backup is opened as its own standalone local
+ * db, every table is read out of it, and the live tables are wiped and
+ * reloaded through the normal write path in one transaction —
+ * `defer_foreign_keys` lets every table's rows be deleted and reinserted in
+ * any order, including the self-referencing `transactions.transferPeerId`.
  */
 export async function restoreBackup(filename: string): Promise<string | null> {
   const source = backupPath(filename);
@@ -93,10 +126,27 @@ export async function restoreBackup(filename: string): Promise<string | null> {
   if (!isSqliteFile(source)) return "That file is not a SQLite database.";
 
   await createBackup("pre-restore");
-  withDbClosed(() => {
-    fs.copyFileSync(source, dbPath);
-    fs.rmSync(`${dbPath}-wal`, { force: true });
-    fs.rmSync(`${dbPath}-shm`, { force: true });
+
+  const backupClient = createClient({ url: `file:${source}` });
+  let snapshot: { table: (typeof DATA_TABLES)[number]; rows: Record<string, unknown>[] }[];
+  try {
+    const backupDb = drizzle(backupClient, { schema });
+    snapshot = await Promise.all(
+      DATA_TABLES.map(async (table) => ({
+        table,
+        rows: await backupDb.select().from(table as never),
+      })),
+    );
+  } finally {
+    backupClient.close();
+  }
+
+  await db.transaction(async (tx) => {
+    await tx.run(sql`PRAGMA defer_foreign_keys = ON`);
+    for (const { table } of snapshot) await tx.delete(table).run();
+    for (const { table, rows } of snapshot) {
+      if (rows.length > 0) await tx.insert(table).values(rows as never).run();
+    }
   });
   return null;
 }
@@ -129,23 +179,17 @@ export function importBackupFile(
  */
 export async function clearDatabase(): Promise<void> {
   await createBackup("pre-reset");
-  db.transaction((tx) => {
-    // FK-safe order: children first
-    tx.delete(schema.amazonMatches).run();
-    tx.delete(schema.amazonOrderItems).run();
-    tx.delete(schema.amazonOrders).run();
-    tx.delete(schema.transactionSplits).run();
-    tx.delete(schema.stagedRows).run();
-    tx.delete(schema.transactions).run();
-    tx.delete(schema.balanceSnapshots).run();
-    tx.delete(schema.csvMappings).run();
-    tx.delete(schema.merchantMemory).run();
-    tx.delete(schema.importBatches).run();
-    tx.delete(schema.categories).run();
-    tx.delete(schema.accounts).run();
-    for (const c of STARTER_CATEGORIES) {
-      tx.insert(schema.categories).values(c).run();
-    }
+  await db.transaction(async (tx) => {
+    await tx.run(sql`PRAGMA defer_foreign_keys = ON`);
+    for (const table of DATA_TABLES) await tx.delete(table).run();
+    await tx.insert(schema.categories).values(STARTER_CATEGORIES).run();
   });
-  rawSqlite().exec("VACUUM");
+  // Best-effort space reclaim — an in-place VACUUM rewrites the replica's
+  // local file structure, which isn't guaranteed to be safe mid-sync, so a
+  // failure here must not undo the wipe above.
+  try {
+    await rawClient().execute("VACUUM");
+  } catch {
+    // ignore — the data wipe already committed
+  }
 }

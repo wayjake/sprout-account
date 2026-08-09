@@ -1,5 +1,5 @@
-import { Database } from "bun:sqlite";
-import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
+import { createClient, type Client } from "@libsql/client";
+import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 import fs from "node:fs";
 import path from "node:path";
 import * as schema from "~/db/schema";
@@ -7,32 +7,25 @@ import * as schema from "~/db/schema";
 export const dbPath = process.env.DATABASE_PATH ?? "./data/finance.db";
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-function connect() {
-  const sqlite = new Database(dbPath, { create: true });
-  sqlite.exec("PRAGMA journal_mode = WAL;");
-  sqlite.exec("PRAGMA foreign_keys = ON;");
-  return { sqlite, orm: drizzle(sqlite, { schema }) };
-}
+// Turso is optional — unset TURSO_DB_URL/TURSO_DB_KEY and this is a plain
+// local libSQL file, same as before, no network involved. Set them and it
+// becomes an embedded replica: reads stay local, writes delegate to the
+// Turso primary over the network.
+const syncUrl = process.env.TURSO_DB_URL;
+const authToken = process.env.TURSO_DB_KEY;
 
-let conn = connect();
+const client: Client = createClient({
+  url: `file:${dbPath}`,
+  ...(syncUrl ? { syncUrl, authToken } : {}),
+});
+if (syncUrl) await client.sync();
+await client.execute("PRAGMA foreign_keys = ON;");
 
-/** Live binding — importers always see the current connection. */
-export let db: BunSQLiteDatabase<typeof schema> = conn.orm;
+export const db: LibSQLDatabase<typeof schema> = drizzle(client, { schema });
 
-/** Raw bun:sqlite handle (for VACUUM / VACUUM INTO). */
-export function rawSqlite() {
-  return conn.sqlite;
-}
-
-/** Close the connection so the db file can be swapped, then reopen. */
-export function withDbClosed<T>(fn: () => T): T {
-  conn.sqlite.close();
-  try {
-    return fn();
-  } finally {
-    conn = connect();
-    db = conn.orm;
-  }
+/** Raw libSQL client handle (for VACUUM / VACUUM INTO). */
+export function rawClient(): Client {
+  return client;
 }
 
 export { schema };

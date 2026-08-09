@@ -1,3 +1,4 @@
+import { Link } from "react-router";
 import type {
   AccountReconciliation,
   ReconcileIssue,
@@ -32,6 +33,13 @@ export function IssueList({ issues }: { issues: ReconcileIssue[] }) {
           </span>
           <span className="font-bold">{issue.message}</span>
           {issue.fix && <span className="ml-1 opacity-80">{issue.fix}</span>}
+          {/* Straight to the rows the diagnosis is about — naming a row and
+              leaving the user to hunt for it isn't much of a diagnosis. */}
+          {issue.link && (
+            <Link to={issue.link.to} className="ml-1 font-bold underline">
+              {issue.link.label}
+            </Link>
+          )}
         </li>
       ))}
     </ul>

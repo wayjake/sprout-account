@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, like, lt, not, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, like, lt, not, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
 import { clearedStateFor, clearedWindows, type ClearedWindow } from "~/.server/balances";
 import type { SpendingClass } from "~/db/schema";
@@ -15,6 +15,12 @@ export interface TransactionFilters {
   q?: string;
   /** "yes" — inside a period that ties out; "no" — everything else */
   reconciled?: "yes" | "no";
+  /**
+   * An explicit set of rows, how the reconcile diagnoses hand you the exact
+   * transactions they are about. Narrower than every other filter, so it is
+   * applied alongside them rather than instead of them.
+   */
+  ids?: number[];
 }
 
 export function parseTransactionFilters(url: URL): TransactionFilters {
@@ -45,7 +51,18 @@ export function parseTransactionFilters(url: URL): TransactionFilters {
         : p.get("reconciled") === "no"
           ? "no"
           : undefined,
+    ids: idList(p.get("ids")),
   };
+}
+
+/** `?ids=12,13,88` — anything unparseable is dropped, an empty result ignored. */
+function idList(raw: string | null): number[] | undefined {
+  if (!raw) return undefined;
+  const ids = raw
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return ids.length > 0 ? ids : undefined;
 }
 
 /**
@@ -80,6 +97,7 @@ function reconciledCondition(
 function filterConditions(f: TransactionFilters): SQL[] {
   const t = schema.transactions;
   const conds: SQL[] = [];
+  if (f.ids) conds.push(inArray(t.id, f.ids));
   if (f.accountId) conds.push(eq(t.accountId, f.accountId));
   if (f.categoryId === "none") conds.push(isNull(t.categoryId));
   else if (f.categoryId) conds.push(eq(t.categoryId, f.categoryId));
@@ -187,39 +205,124 @@ export type TransactionListRow = Awaited<
   ReturnType<typeof listTransactions>
 >["rows"][number];
 
-/**
- * Transactions inserted by a set of import batches, for the post-import
- * categorize screen. Auto-linked transfer legs are excluded — they already
- * carry a transfer-class category from `autoLinkTransfers` and drop out of
- * income/spend reporting, so they don't belong in a categorization queue.
- */
-export async function listImportedTransactions(batchIds: number[]) {
-  if (batchIds.length === 0) return [];
-  const t = schema.transactions;
-  return db
-    .select({
-      id: t.id,
-      date: t.date,
-      amountCents: t.amountCents,
-      description: t.description,
-      merchant: t.merchant,
-      categoryId: t.categoryId,
-      categorySource: t.categorySource,
-      accountId: t.accountId,
-      accountName: schema.accounts.name,
-      categoryName: schema.categories.name,
-      spendingClass: schema.categories.spendingClass,
-    })
-    .from(t)
-    .leftJoin(schema.accounts, eq(t.accountId, schema.accounts.id))
-    .leftJoin(schema.categories, eq(t.categoryId, schema.categories.id))
-    .where(and(inArray(t.importBatchId, batchIds), isNull(t.transferPeerId)))
-    .orderBy(desc(t.date), desc(t.id));
+export interface NeighborRow {
+  id: number;
+  date: string;
+  merchant: string;
 }
 
-export type ImportedTransactionRow = Awaited<
-  ReturnType<typeof listImportedTransactions>
->[number];
+/**
+ * The rows immediately above and below `current` in the register's filtered
+ * order — what Previous / Next in the transaction window walk. The filters and
+ * the `date desc, id desc` ordering have to match `listTransactions` exactly,
+ * or walking the list would skip or repeat rows against what the register
+ * underneath is showing.
+ *
+ * Position, not membership: the neighbours are keyed off the current row's
+ * date and id rather than off it still matching the filters. Filing a category
+ * while filtered to Uncategorized drops the row out of the set, and Next still
+ * has to move on from where that row sat.
+ *
+ * Pass `windows` when the caller already has them — the reconciled filter needs
+ * them and they aren't cheap to derive twice.
+ */
+export async function neighborTransactions(
+  filters: TransactionFilters,
+  current: { date: string; id: number },
+  windows?: Map<number, ClearedWindow[]>,
+): Promise<{ previous: NeighborRow | null; next: NeighborRow | null }> {
+  const t = schema.transactions;
+  const conds = filterConditions(filters);
+  if (filters.reconciled) {
+    conds.push(
+      reconciledCondition(windows ?? (await clearedWindows()), filters.reconciled),
+    );
+  }
+
+  // "next" is further down the list (older), "previous" further up (newer).
+  const pick = async (direction: "previous" | "next") => {
+    const older = direction === "next";
+    const beyond = older
+      ? or(
+          lt(t.date, current.date),
+          and(eq(t.date, current.date), lt(t.id, current.id)),
+        )!
+      : or(
+          gt(t.date, current.date),
+          and(eq(t.date, current.date), gt(t.id, current.id)),
+        )!;
+    const [row] = await db
+      .select({ id: t.id, date: t.date, merchant: t.merchant })
+      .from(t)
+      .where(and(...conds, beyond))
+      .orderBy(...(older ? [desc(t.date), desc(t.id)] : [asc(t.date), asc(t.id)]))
+      .limit(1);
+    return row ?? null;
+  };
+
+  const [previous, next] = await Promise.all([pick("previous"), pick("next")]);
+  return { previous, next };
+}
+
+/**
+ * The register filters that frame what an import just added. The account only
+ * survives when the session touched exactly one, since the register filters on
+ * a single id; the date span always does.
+ */
+async function importedRegisterFilters(batchIds: number[]) {
+  if (batchIds.length === 0) return null;
+  const t = schema.transactions;
+  const rows = await db
+    .select({
+      accountId: t.accountId,
+      from: sql<string>`min(${t.date})`,
+      to: sql<string>`max(${t.date})`,
+    })
+    .from(t)
+    .where(inArray(t.importBatchId, batchIds))
+    .groupBy(t.accountId);
+  if (rows.length === 0) return null;
+  return {
+    accountId: rows.length === 1 ? rows[0].accountId : null,
+    from: rows.reduce((min, r) => (r.from < min ? r.from : min), rows[0].from),
+    to: rows.reduce((max, r) => (r.to > max ? r.to : max), rows[0].to),
+  };
+}
+
+/**
+ * Where a commit lands: the register, filtered to the account and dates the
+ * import just touched and narrowed to what still has no category — the work
+ * the old post-import screen existed to do, done in the place that already
+ * knows how to do it.
+ *
+ * The commit tally rides along because it only exists in memory at this point
+ * (per-batch `statsJson` doesn't carry the session-wide transfer count), which
+ * is also why a revisit of the URL simply shows no banner.
+ */
+export async function importedRegisterSearch(
+  batchIds: number[],
+  stats: {
+    inserted: number;
+    balancesRecorded: number;
+    skipped: number;
+    transfersLinked: number;
+  },
+): Promise<string> {
+  const params = new URLSearchParams({
+    added: String(stats.inserted),
+    balances: String(stats.balancesRecorded),
+    skipped: String(stats.skipped),
+    transfers: String(stats.transfersLinked),
+  });
+  const filters = await importedRegisterFilters(batchIds);
+  if (filters) {
+    if (filters.accountId) params.set("account", String(filters.accountId));
+    params.set("from", filters.from);
+    params.set("to", filters.to);
+    params.set("category", "none");
+  }
+  return params.toString();
+}
 
 // --- dashboard aggregates ---
 // "Effective" rows: splits replace their parent transaction so category/class

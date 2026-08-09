@@ -137,7 +137,7 @@ export function Button({
     size === "sm" ? "px-2.5 py-[3px] text-[11px]" : "px-4 py-[5px] text-[12px]";
   return (
     <button
-      className={`inline-flex items-center justify-center gap-1.5 disabled:text-chrome-dark disabled:[text-shadow:1px_1px_0_#fff] ${sizeCls} ${buttonVariants[variant]} ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap disabled:text-chrome-dark disabled:[text-shadow:1px_1px_0_#fff] ${sizeCls} ${buttonVariants[variant]} ${className}`}
       {...props}
     >
       <span className="inline-flex items-center gap-1.5">{children}</span>
@@ -147,6 +147,9 @@ export function Button({
 
 export const inputClass =
   "field-inset w-full px-2 py-[4px] text-[12px] text-black placeholder:text-gray-500";
+
+export const fileInputClass =
+  "field-inset file-bevel block w-full p-[3px] text-[12px] text-black";
 
 export const selectClass =
   "field-inset px-1.5 py-[4px] text-[12px] text-black";

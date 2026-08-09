@@ -33,7 +33,13 @@ process.env.DATABASE_PATH =
   process.env.SPROUT_DB_PATH ?? path.join(APP_DIR, "finance.db");
 
 // ——— First-run bootstrap: create schema + starter categories ———
-{
+// Skipped when Turso is configured (TURSO_DB_URL / TURSO_DB_KEY, picked up
+// from a stray .env same as SPROUT_DB_PATH's sibling knobs) — the schema
+// already lives on the primary (pushed there by `npm run db:push`), and
+// db.ts's embedded-replica client pulls it down on connect instead. A
+// Turso-less build stays exactly as before: fully local, first run creates
+// its own schema from the embedded dump.
+if (!process.env.TURSO_DB_URL) {
   const boot = new Database(process.env.DATABASE_PATH, { create: true });
   const hasTables = boot
     .query("select name from sqlite_master where type='table' and name='transactions'")

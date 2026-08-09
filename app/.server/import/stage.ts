@@ -50,6 +50,12 @@ export interface StagedTxnData {
   description: string;
   merchant: string;
   amountCents: number;
+  /**
+   * The date the statement printed, when `date` was clamped into the statement
+   * period. Persisted so a re-stage against another account still matches the
+   * ledger on what the statement said rather than on where the row was filed.
+   */
+  matchDate?: string;
   /** Set on a statement row that a close found already in the books */
   matchedDate?: string;
   matchedDescription?: string;
@@ -79,7 +85,15 @@ function normalizeDescription(desc: string): string {
  * the file — the ordinal distinguishes two genuinely identical purchases on
  * one statement while keeping re-imports of the same statement idempotent.
  */
-type TxnRowInput = NormalizedTxnRow & { rowIndex?: number };
+type TxnRowInput = NormalizedTxnRow & {
+  rowIndex?: number;
+  /**
+   * The date the source actually printed, when `date` has been moved off it —
+   * a statement clamped into its own period (`extractFromPdf`). The ledger is
+   * matched on this, so moving a row never costs it its counterpart.
+   */
+  matchDate?: string;
+};
 type BalanceRowInput = NormalizedBalanceRow & { rowIndex?: number; kind?: string };
 
 export function computeTxnHashes(rows: NormalizedTxnRow[]): string[] {
@@ -302,7 +316,11 @@ async function buildStatementTransactionRows(
   const hashes = computeTxnHashes(rows);
   if (rows.length === 0) return [];
 
-  const dates = rows.map((r) => r.date).sort();
+  // Match on what the statement printed, not on where the row was filed — see
+  // `matchDate`. Staging still records the filed date; only the search moves.
+  const matchDateOf = (r: TxnRowInput) => r.matchDate ?? r.date;
+
+  const dates = rows.map(matchDateOf).sort();
   const ledger = await db
     .select({
       id: schema.transactions.id,
@@ -343,17 +361,18 @@ async function buildStatementTransactionRows(
     rows.forEach((row, i) => {
       if (matched.has(i)) return;
       const normalized = normalizeDescription(row.description);
+      const printed = matchDateOf(row);
       const candidate = (byAmount.get(row.amountCents) ?? [])
         .filter(
-          (c) => !taken.has(c.id) && Math.abs(daysBetween(c.date, row.date)) <= slack,
+          (c) => !taken.has(c.id) && Math.abs(daysBetween(c.date, printed)) <= slack,
         )
         // Same wording is the surest sign of the same transaction; after that,
         // the nearest date, then the oldest row, so the result never wobbles.
         .sort(
           (a, b) =>
             Number(b.normalized === normalized) - Number(a.normalized === normalized) ||
-            Math.abs(daysBetween(a.date, row.date)) -
-              Math.abs(daysBetween(b.date, row.date)) ||
+            Math.abs(daysBetween(a.date, printed)) -
+              Math.abs(daysBetween(b.date, printed)) ||
             a.id - b.id,
         )[0];
       if (!candidate) return;
@@ -372,16 +391,17 @@ async function buildStatementTransactionRows(
   const signConflicts = new Map<number, LedgerCandidate>();
   rows.forEach((row, i) => {
     if (matched.has(i)) return;
+    const printed = matchDateOf(row);
     const candidate = (byAmount.get(-row.amountCents) ?? [])
       .filter(
         (c) =>
           !taken.has(c.id) &&
-          Math.abs(daysBetween(c.date, row.date)) <= STATEMENT_MATCH_WINDOW_DAYS,
+          Math.abs(daysBetween(c.date, printed)) <= STATEMENT_MATCH_WINDOW_DAYS,
       )
       .sort(
         (a, b) =>
-          Math.abs(daysBetween(a.date, row.date)) -
-            Math.abs(daysBetween(b.date, row.date)) || a.id - b.id,
+          Math.abs(daysBetween(a.date, printed)) -
+            Math.abs(daysBetween(b.date, printed)) || a.id - b.id,
       )[0];
     if (!candidate || candidate.amountCents === 0) return;
     signConflicts.set(i, candidate);
@@ -397,6 +417,7 @@ async function buildStatementTransactionRows(
       description: r.description,
       merchant: normalizeMerchant(r.description),
       amountCents: r.amountCents,
+      matchDate: r.matchDate,
       matchedDate: found?.date,
       matchedDescription: found?.description,
       signConflict: flipped ? true : undefined,
@@ -538,6 +559,7 @@ export async function restageBatchAccount(batchId: number, newAccountId: number)
         date: d.date,
         description: d.description,
         amountCents: d.amountCents,
+        matchDate: d.matchDate,
         rowIndex: row.rowIndex,
       });
     }
@@ -812,11 +834,11 @@ export async function commitBatch(
   const allCategories = await db.select().from(schema.categories);
   const stats = emptyStats();
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     for (const row of included) {
       if (row.rowKind === "balance") {
         const data = JSON.parse(row.dataJson) as StagedBalanceData;
-        tx.insert(schema.balanceSnapshots)
+        await tx.insert(schema.balanceSnapshots)
           .values({
             accountId: account.id,
             date: data.date,
@@ -847,7 +869,7 @@ export async function commitBatch(
         guarded === undefined ? (memoryHit?.categoryId ?? null) : guarded;
       const categorySource: schema.CategorySource | null =
         categoryId == null ? null : guarded === undefined ? "memory" : "auto";
-      const inserted = tx
+      const inserted = await tx
         .insert(schema.transactions)
         .values({
           accountId: account.id,
@@ -872,11 +894,11 @@ export async function commitBatch(
     }
 
     // Staged rows have served their purpose once committed
-    tx.delete(schema.stagedRows)
+    await tx.delete(schema.stagedRows)
       .where(eq(schema.stagedRows.batchId, batchId))
       .run();
     const priorStats = batch.statsJson ? JSON.parse(batch.statsJson) : {};
-    tx.update(schema.importBatches)
+    await tx.update(schema.importBatches)
       .set({
         status: "committed",
         committedAt: sql`(unixepoch())`,

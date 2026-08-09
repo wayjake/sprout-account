@@ -10,6 +10,7 @@ import {
   discardSession,
   pendingRowsForBatches,
 } from "~/.server/import/stage";
+import { importedRegisterSearch } from "~/.server/queries";
 import { ReconcilePanel } from "~/components/reconciliation";
 import { Button, Card, CardHeader, EmptyState, selectClass } from "~/components/ui";
 import { formatDateRange } from "~/lib/dates";
@@ -222,19 +223,17 @@ export async function action({ params, request }: Route.ActionArgs) {
         { status: 400 },
       );
     }
-    // Nothing to categorize (all duplicates, or a balances-only import) — the
-    // categorize screen would just be empty, so stay on the summary instead.
+    // Nothing was added (all duplicates, or a balances-only import) — there is
+    // no import to go and look at, so stay on the summary instead.
     // Commit stats travel via query string since they only live in memory here
     // (per-batch statsJson doesn't carry the session-wide transfer-link count).
     if (result.stats.inserted > 0) {
-      const s = result.stats;
-      const qs = new URLSearchParams({
-        added: String(s.inserted),
-        balances: String(s.balancesRecorded),
-        skipped: String(s.skipped),
-        transfers: String(s.transfersLinked),
-      });
-      return redirect(`/import/session/${sessionId}/categorize?${qs}`);
+      return redirect(
+        `/transactions?${await importedRegisterSearch(
+          result.committedBatchIds,
+          result.stats,
+        )}`,
+      );
     }
     return { committed: result.stats };
   }

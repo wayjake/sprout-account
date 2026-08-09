@@ -49,6 +49,11 @@ back to a header-name heuristic and categorization uses merchant memory only.
   merchant (merchant memory), repeat merchants auto-categorize free at import
   time, and the *AI categorize* button (Transactions page) sends only the
   still-unknown ones to OpenRouter. Your corrections always outrank AI memory.
+  Filing happens by opening a transaction — a type-to-search category box, a
+  *Suggest a category* button for the AI's opinion on that one row, and
+  Previous / Next to walk the filtered register without closing the window.
+  Committing an import drops you straight into that list, filtered to the
+  account, dates, and still-uncategorized rows it just added.
 - **Spending classes**: every category is *base* (mortgage, utilities —
   the fixed foundation), *living* (groceries, gas — day-to-day needs),
   *luxury* (restaurants, shopping — discretionary), *income*, or *transfer*
@@ -65,6 +70,14 @@ back to a header-name heuristic and categorization uses merchant memory only.
   data is auto-stashed as `pre-restore` first), load external `.db` files, and a
   type-to-confirm **Clear database** that starts you fresh with starter categories
   (auto-stashed as `pre-reset`).
+- **Categorization rules, on their own**: save your categories and merchant rules
+  to a small `.json` file, separate from the ledger they came out of. Clear the
+  database, then load the file back and the app still knows that SQ \*COFFEE is
+  Restaurants — you start fresh on accounts without teaching it everything again.
+  Loading merges by name: categories are only added (an existing one keeps its own
+  spending class, nothing is deleted), and your own choices beat the file's when
+  both have an opinion. Replace mode clears merchant rules first if you'd rather
+  the file be the whole list.
 
 ## Desktop app (macOS arm64)
 

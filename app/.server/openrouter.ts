@@ -32,19 +32,69 @@ function apiKey(): string {
   return key;
 }
 
+/**
+ * A statement page can take a minute to come back, so the ceiling is generous —
+ * but there must be one. `fetch` waits forever on a connection that stalls
+ * without closing, and extraction now issues a request per chunk: one stalled
+ * socket would otherwise hang the whole import with nothing to show for it.
+ */
+const REQUEST_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS ?? 180_000);
+const MAX_ATTEMPTS = 3;
+/** Statuses worth another go: rate limiting and the transient upstream faults. */
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function requestOnce(body: unknown): Promise<string> {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey()}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
+  let res: Response | undefined;
+  let lastFailure = "";
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // A timeout or a dropped connection — nothing was returned to judge, so
+      // the request is simply worth repeating.
+      lastFailure =
+        err instanceof Error && err.name === "TimeoutError"
+          ? `timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`
+          : String(err instanceof Error ? err.message : err);
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+      throw new AiError(
+        `OpenRouter request failed after ${MAX_ATTEMPTS} attempts (${lastFailure}).`,
+      );
+    }
+
+    if (res.ok) break;
+
     const text = await res.text().catch(() => "");
-    throw new AiError(`OpenRouter request failed (${res.status}): ${text.slice(0, 500)}`);
+    lastFailure = `${res.status}: ${text.slice(0, 500)}`;
+    if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_ATTEMPTS) {
+      // Honour Retry-After when the server sets it, else back off exponentially.
+      const retryAfter = Number(res.headers.get("retry-after"));
+      await sleep(
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter, 30) * 1000
+          : 1000 * 2 ** (attempt - 1),
+      );
+      res = undefined;
+      continue;
+    }
+    throw new AiError(`OpenRouter request failed (${lastFailure})`);
   }
+
+  if (!res) throw new AiError(`OpenRouter request failed (${lastFailure})`);
   const json = (await res.json()) as {
     choices?: { message?: { content?: string } }[];
     error?: { message?: string };

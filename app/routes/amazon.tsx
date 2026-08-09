@@ -2,7 +2,14 @@ import { Form, Link, data, useFetcher, useNavigation } from "react-router";
 import { and, desc, eq, isNull, like, lt, notInArray, or, sql } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
 import { importOrderHistoryCsv, runMatcher } from "~/.server/amazon";
-import { Amount, Button, Card, CardHeader, EmptyState } from "~/components/ui";
+import {
+  Amount,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  fileInputClass,
+} from "~/components/ui";
 import { formatDate } from "~/lib/dates";
 import { formatCents } from "~/lib/money";
 import type { Route } from "./+types/amazon";
@@ -213,7 +220,7 @@ export default function Amazon({ loaderData, actionData }: Route.ComponentProps)
               name="file"
               accept=".csv,text/csv"
               required
-              className="block flex-1 text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-primary-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary-800 hover:file:bg-primary-200"
+              className={`${fileInputClass} min-w-0 flex-1`}
             />
             <Button type="submit" disabled={busy}>
               {busy ? "Importing…" : "Import orders"}

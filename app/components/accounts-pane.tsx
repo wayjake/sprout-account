@@ -179,24 +179,25 @@ function TypeAndTrackingFields({
           ))}
         </select>
       </Field>
-      {choosable && (
-        <Field label="Tracking">
-          <select
-            name="kind"
-            defaultValue={
-              defaultType === type ? (defaultKind ?? kindForAccountType(type)) : kindForAccountType(type)
-            }
-            key={type}
-            className={`${selectClass} w-full`}
-          >
-            {ACCOUNT_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {ACCOUNT_KIND_LABELS[k]}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
+      <Field label="Tracking">
+        <select
+          name="kind"
+          disabled={!choosable}
+          defaultValue={
+            choosable && defaultType === type
+              ? (defaultKind ?? kindForAccountType(type))
+              : kindForAccountType(type)
+          }
+          key={type}
+          className={`${selectClass} w-full disabled:opacity-60`}
+        >
+          {ACCOUNT_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {ACCOUNT_KIND_LABELS[k]}
+            </option>
+          ))}
+        </select>
+      </Field>
       {choosable && (
         <p className="text-[11px] text-gray-600 sm:col-span-2">
           Import transactions when you have a statement of draws and payments, as a line

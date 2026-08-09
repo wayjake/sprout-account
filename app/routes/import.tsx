@@ -10,6 +10,7 @@ import {
   CardHeader,
   EmptyState,
   Field,
+  fileInputClass,
   selectClass,
 } from "~/components/ui";
 import type { Route } from "./+types/import";
@@ -188,7 +189,7 @@ export default function Import({ loaderData, actionData }: Route.ComponentProps)
                 multiple
                 accept=".csv,.txt,text/csv"
                 required
-                className="block w-full text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-primary-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary-800 hover:file:bg-primary-200"
+                className={fileInputClass}
               />
             </Field>
             <Button type="submit" disabled={uploading}>

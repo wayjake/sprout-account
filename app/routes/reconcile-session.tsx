@@ -11,6 +11,7 @@ import {
   discardSession,
   pendingRowsForBatches,
 } from "~/.server/import/stage";
+import { importedRegisterSearch } from "~/.server/queries";
 import { statementCloses, type StatementClose } from "~/.server/reconcile";
 import { ReconcilePanel } from "~/components/reconciliation";
 import { Amount, Button, Card, CardHeader, EmptyState, selectClass } from "~/components/ui";
@@ -147,17 +148,15 @@ export async function action({ params, request }: Route.ActionArgs) {
       );
     }
     // Rows added to fill a gap arrive uncategorized, so hand them straight to
-    // the confirm-or-fix pass. A close that only recorded balances has nothing
-    // to categorize and stays here.
+    // the register, framed by what this close added. A close that only recorded
+    // balances added nothing to look at and stays here.
     if (result.stats.inserted > 0) {
-      const s = result.stats;
-      const qs = new URLSearchParams({
-        added: String(s.inserted),
-        balances: String(s.balancesRecorded),
-        skipped: String(s.skipped),
-        transfers: String(s.transfersLinked),
-      });
-      return redirect(`/import/session/${sessionId}/categorize?${qs}`);
+      return redirect(
+        `/transactions?${await importedRegisterSearch(
+          result.committedBatchIds,
+          result.stats,
+        )}`,
+      );
     }
     return { committed: result.stats };
   }

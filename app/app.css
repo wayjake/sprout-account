@@ -99,6 +99,30 @@ body {
   outline-offset: -5px;
 }
 
+/* File inputs: the browser's own picker button, wearing .bevel-btn */
+.file-bevel::file-selector-button {
+  background: var(--color-chrome);
+  box-shadow:
+    inset -1px -1px #0a0a0a,
+    inset 1px 1px #ffffff,
+    inset -2px -2px #808080,
+    inset 2px 2px #efece6;
+  border: none;
+  border-radius: 0;
+  margin-right: 8px;
+  padding: 3px 12px;
+  font: inherit;
+  color: #000;
+  user-select: none;
+}
+.file-bevel::file-selector-button:active {
+  box-shadow:
+    inset 1px 1px #0a0a0a,
+    inset -1px -1px #ffffff,
+    inset 2px 2px #808080,
+    inset -2px -2px #efece6;
+}
+
 .groove {
   border: 2px groove #efece6;
 }

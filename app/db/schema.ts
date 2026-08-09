@@ -189,13 +189,15 @@ export const BATCH_STATUSES = [
 ] as const;
 
 /**
- * Which of the two upload flows a session belongs to. `import` is the CSV
+ * Which of the three upload flows a session belongs to. `import` is the CSV
  * transaction import — files are the source of the ledger. `reconcile` is the
- * month-end close against PDF statements — the statement is the authority the
- * ledger is checked against, and only the rows it turns out to be missing get
- * added. The two never mix in one session.
+ * month-end close against PDF statements — every line is checked off against
+ * the books and the ones they turn out to be missing are offered. `bulk` is the
+ * same close machinery run unattended over a whole folder, which on an account
+ * with no ledger yet means the statements *become* the ledger. The three never
+ * mix in one session.
  */
-export const SESSION_PURPOSES = ["import", "reconcile"] as const;
+export const SESSION_PURPOSES = ["import", "reconcile", "bulk"] as const;
 export type SessionPurpose = (typeof SESSION_PURPOSES)[number];
 
 /** One upload of N files. Batches under it are reviewed and committed together. */
@@ -207,6 +209,13 @@ export const importSessions = sqliteTable("import_sessions", {
     .default("open"),
   /** Files in the upload that could not be read at all, and why */
   notesJson: text("notes_json"),
+  /**
+   * A bulk run's own bookkeeping (`BulkState` in `app/.server/import/bulk.ts`):
+   * which phase it is in, its settings, and the categorize id list. Persisted
+   * rather than held in the browser so closing the tab pauses the run instead
+   * of losing it — see the driver notes in CLAUDE.md. Null for other purposes.
+   */
+  bulkStateJson: text("bulk_state_json"),
   createdAt: createdAt(),
   committedAt: integer("committed_at"),
 });
@@ -276,6 +285,64 @@ export const stagedRows = sqliteTable(
     ),
   },
   (t) => [index("staged_batch_idx").on(t.batchId)],
+);
+
+/**
+ * How far one file in a bulk run has got. The happy path is
+ * `queued → identified → staged → committed → categorized`; the rest are places
+ * a file stops. `needs_input` is waiting on an answer (`questionJson`); `held`
+ * staged but was kept out of the automatic commit — an extraction that does not
+ * tie out to its own printed balances, which is the one warning nobody should
+ * be able to sail past.
+ */
+export const BULK_FILE_STATUSES = [
+  "queued",
+  "identified",
+  "staged",
+  "committed",
+  "categorized",
+  "needs_input",
+  "held",
+  "skipped",
+  "failed",
+] as const;
+export type BulkFileStatus = (typeof BULK_FILE_STATUSES)[number];
+
+/**
+ * One statement in a bulk run, tracked from the moment it is uploaded rather
+ * than from the moment it parses. An `import_batch` only exists once extraction
+ * has succeeded, so a queued or failed file has no batch to live on — and the
+ * run has to survive a reload, which means every file's position has to be a
+ * row rather than a step in a loop somebody is waiting on.
+ */
+export const bulkFiles = sqliteTable(
+  "bulk_files",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sessionId: integer("session_id")
+      .notNull()
+      .references(() => importSessions.id, { onDelete: "cascade" }),
+    /** Position in the upload — the order files are worked through. */
+    orderIndex: integer("order_index").notNull(),
+    filename: text("filename").notNull(),
+    /** Path within the chosen folder, so two `statement.pdf`s stay tellable apart. */
+    relPath: text("rel_path"),
+    fileHash: text("file_hash"),
+    sizeBytes: integer("size_bytes"),
+    status: text("status", { enum: BULK_FILE_STATUSES }).notNull().default("queued"),
+    accountId: integer("account_id").references(() => accounts.id),
+    /** How the account was arrived at, in the user's words. */
+    accountAssignment: text("account_assignment"),
+    batchId: integer("batch_id").references(() => importBatches.id, {
+      onDelete: "set null",
+    }),
+    /** A `BulkQuestion` while status is `needs_input`, else null. */
+    questionJson: text("question_json"),
+    /** Why the file stopped, for `failed`, `skipped` and `held`. */
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("bulk_file_session_idx").on(t.sessionId, t.orderIndex)],
 );
 
 export const csvMappings = sqliteTable(
@@ -425,6 +492,22 @@ export const balanceSnapshotsRelations = relations(
 
 export const importSessionsRelations = relations(importSessions, ({ many }) => ({
   batches: many(importBatches),
+  bulkFiles: many(bulkFiles),
+}));
+
+export const bulkFilesRelations = relations(bulkFiles, ({ one }) => ({
+  session: one(importSessions, {
+    fields: [bulkFiles.sessionId],
+    references: [importSessions.id],
+  }),
+  account: one(accounts, {
+    fields: [bulkFiles.accountId],
+    references: [accounts.id],
+  }),
+  batch: one(importBatches, {
+    fields: [bulkFiles.batchId],
+    references: [importBatches.id],
+  }),
 }));
 
 export const importBatchesRelations = relations(
@@ -513,6 +596,7 @@ export type BalanceSnapshot = typeof balanceSnapshots.$inferSelect;
 export type ImportBatch = typeof importBatches.$inferSelect;
 export type ImportSession = typeof importSessions.$inferSelect;
 export type StagedRow = typeof stagedRows.$inferSelect;
+export type BulkFile = typeof bulkFiles.$inferSelect;
 export type CsvMapping = typeof csvMappings.$inferSelect;
 export type MerchantMemoryRow = typeof merchantMemory.$inferSelect;
 export type AmazonOrder = typeof amazonOrders.$inferSelect;

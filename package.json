@@ -13,11 +13,13 @@
     "desktop:build": "react-router build && bun scripts/desktop/build.ts && tauri build"
   },
   "dependencies": {
+    "@libsql/client": "^0.17.4",
     "@react-router/node": "^8",
     "@react-router/serve": "^8",
     "drizzle-orm": "^0.45.2",
     "isbot": "^5.1.36",
     "papaparse": "^5.5.4",
+    "pdf-lib": "^1.17.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router": "^8",

@@ -7,7 +7,16 @@ import {
   listBackups,
   restoreBackup,
 } from "~/.server/backups";
-import { Button, Card, CardHeader, EmptyState, Field, inputClass } from "~/components/ui";
+import { importRules, parseRulesFile } from "~/.server/rules";
+import {
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  Field,
+  fileInputClass,
+  inputClass,
+} from "~/components/ui";
 import type { Route } from "./+types/backups";
 
 export function meta() {
@@ -17,6 +26,9 @@ export function meta() {
 export async function loader(_: Route.LoaderArgs) {
   return { backups: listBackups() };
 }
+
+/** A rules file is names and counts — anything this big isn't one. */
+const RULES_MAX_BYTES = 8 * 1024 * 1024;
 
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
@@ -60,6 +72,38 @@ export async function action({ request }: Route.ActionArgs) {
     if ("error" in result) return data({ error: result.error }, { status: 400 });
     return {
       message: `Imported as ${result.filename} — restore it below to make it the live database.`,
+    };
+  }
+
+  if (intent === "import-rules") {
+    const file = form.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      return data({ error: "Choose a rules .json file to load." }, { status: 400 });
+    }
+    if (file.size > RULES_MAX_BYTES) {
+      return data(
+        { error: "That rules file is unexpectedly large (over 8 MB)." },
+        { status: 400 },
+      );
+    }
+    const parsed = parseRulesFile(await file.text());
+    if ("error" in parsed) return data({ error: parsed.error }, { status: 400 });
+
+    const mode = form.get("mode") === "replace" ? "replace" : "merge";
+    const r = await importRules(parsed, mode);
+    const parts = [
+      `${r.categoriesCreated} new ${r.categoriesCreated === 1 ? "category" : "categories"} (${r.categoriesMatched} already on file)`,
+      `${r.memoryAdded} merchant rules added`,
+      `${r.memoryUpdated} updated`,
+      `${r.memoryUnchanged} unchanged`,
+    ];
+    if (r.memoryKeptUser > 0) {
+      parts.push(`${r.memoryKeptUser} kept (your own choice beat the file's)`);
+    }
+    if (r.memoryRemoved > 0) parts.push(`${r.memoryRemoved} replaced`);
+    return {
+      message: `Rules loaded: ${parts.join(", ")}.`,
+      warning: r.normalizerWarning,
     };
   }
 
@@ -112,6 +156,11 @@ export default function Backups({ loaderData, actionData }: Route.ComponentProps
           {actionData.message}
         </p>
       )}
+      {actionData && "warning" in actionData && actionData.warning && (
+        <p className="groove bg-[#fff8e6] px-3 py-1.5 text-[12px] text-primary-900">
+          {actionData.warning}
+        </p>
+      )}
 
       <div className="grid grid-cols-2 gap-5">
         <Card>
@@ -138,7 +187,7 @@ export default function Backups({ loaderData, actionData }: Route.ComponentProps
               name="file"
               accept=".db,application/x-sqlite3"
               required
-              className="block flex-1 text-sm text-gray-600 file:mr-3 file:rounded-lg file:border-0 file:bg-primary-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-primary-800 hover:file:bg-primary-200"
+              className={`${fileInputClass} min-w-0 flex-1`}
             />
             <Button type="submit" variant="secondary" disabled={busy}>
               Add to backups
@@ -195,6 +244,72 @@ export default function Backups({ loaderData, actionData }: Route.ComponentProps
             ))}
           </ul>
         )}
+      </Card>
+
+      <Card>
+        <CardHeader title="Categorization rules" />
+        <div className="space-y-4 p-4">
+          <p className="text-sm text-gray-600">
+            Your categories and merchant rules — what the app has learned about
+            which merchant belongs in which category — saved on their own, apart
+            from accounts and transactions. Keep this file before clearing the
+            database and you can start fresh without teaching it everything
+            again.
+          </p>
+
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <p className="text-[12px] font-bold text-primary-950">Save rules to a file</p>
+              <p className="text-xs text-gray-500">
+                Downloads a .json file of every category and merchant rule.
+              </p>
+            </div>
+            {/*
+              A plain link, not a form: the response *is* the file. `Button`
+              renders a real <button> and an <a> may not contain one, so the
+              anchor wears the bevel classes itself.
+            */}
+            <a
+              href="/api/rules/export"
+              download
+              className="bevel-btn inline-flex shrink-0 items-center justify-center gap-1.5 px-4 py-[5px] text-[12px] text-black no-underline"
+            >
+              Save rules
+            </a>
+          </div>
+
+          <div className="groove bg-ledger p-3">
+            <p className="mb-2 text-[12px] font-bold text-primary-950">Load rules from a file</p>
+            <Form
+              method="post"
+              encType="multipart/form-data"
+              className="flex flex-wrap items-end gap-2"
+            >
+              <input type="hidden" name="intent" value="import-rules" />
+              <input
+                type="file"
+                name="file"
+                accept=".json,application/json"
+                required
+                className={`${fileInputClass} min-w-0 flex-1`}
+              />
+              <Field label="If a merchant is already on file">
+                <select name="mode" defaultValue="merge" className={inputClass}>
+                  <option value="merge">Keep my rules, add the rest</option>
+                  <option value="replace">Replace all merchant rules</option>
+                </select>
+              </Field>
+              <Button type="submit" variant="secondary" disabled={busy}>
+                Load rules
+              </Button>
+            </Form>
+            <p className="mt-2 text-xs text-gray-500">
+              Categories are only ever added — a category you already have keeps
+              its own spending class, and nothing is deleted. Replace clears the
+              merchant rules first, so the file becomes the whole list.
+            </p>
+          </div>
+        </div>
       </Card>
 
       <Card>

@@ -139,6 +139,8 @@ export interface ReconcileIssue {
   message: string;
   /** A concrete repair the user can act on, when we can name one */
   fix?: string;
+  /** The rows this is about, as a register link — see `rowsLink`. */
+  link?: { label: string; to: string };
 }
 
 export interface ReconcileWindow {
@@ -180,10 +182,23 @@ export interface PendingRows {
 }
 
 interface WindowTxn {
+  /** Absent on rows an import is only previewing — they aren't in the register yet. */
+  id?: number;
   date: string;
   amountCents: number;
   description: string;
   pending: boolean;
+}
+
+/**
+ * Point an issue at the exact rows it is about. The register takes an `ids`
+ * filter for this: a diagnosis that names a row and then leaves you to hunt
+ * for it by hand isn't much of a diagnosis.
+ */
+function rowsLink(rows: WindowTxn[], label: string): ReconcileIssue["link"] {
+  const ids = rows.map((r) => r.id).filter((id): id is number => id != null);
+  if (ids.length === 0) return undefined;
+  return { label, to: `/transactions?ids=${ids.join(",")}` };
 }
 
 const money = (cents: number) => formatCentsAbs(cents);
@@ -220,6 +235,7 @@ function diagnose(
       severity: "error",
       message: `Off by ${money(diffCents)}, which is exactly "${duplicate.description}" on ${formatDate(duplicate.date)} (${money(duplicate.amountCents)}).`,
       fix: `Removing that one transaction reconciles this period exactly — check whether it was imported twice.`,
+      link: rowsLink([duplicate], "Open that transaction →"),
     });
     return issues;
   }
@@ -235,6 +251,7 @@ function diagnose(
       severity: "error",
       message: `Off by ${money(diffCents)}, which is twice "${flipped.description}" on ${formatDate(flipped.date)} (${money(flipped.amountCents)}).`,
       fix: "That row's sign looks backwards — a charge recorded as a deposit, or vice versa.",
+      link: rowsLink([flipped], "Open that transaction →"),
     });
     return issues;
   }
@@ -251,17 +268,25 @@ function diagnose(
   }
 
   // Exact duplicate rows sitting in the window
-  const seen = new Map<string, number>();
+  const seen = new Map<string, WindowTxn[]>();
   for (const t of txns) {
     const key = `${t.date}|${t.amountCents}|${t.description.toUpperCase().trim()}`;
-    seen.set(key, (seen.get(key) ?? 0) + 1);
+    const group = seen.get(key);
+    if (group) group.push(t);
+    else seen.set(key, [t]);
   }
-  const dupeCount = [...seen.values()].filter((n) => n > 1).length;
-  if (dupeCount > 0) {
+  const dupeGroups = [...seen.values()].filter((g) => g.length > 1);
+  if (dupeGroups.length > 0) {
+    // Every copy, not just the extras: which one to delete is the user's call,
+    // and they need to see them side by side to make it.
+    const rows = dupeGroups.flat();
     issues.push({
       severity: "warning",
-      message: `${dupeCount} identical transaction${dupeCount === 1 ? "" : "s"} appear more than once in this period.`,
-      fix: "Check the register for double-imported rows.",
+      message: `${dupeGroups.length} identical transaction${
+        dupeGroups.length === 1 ? "" : "s"
+      } appear more than once in this period.`,
+      fix: "Delete the extra copies, and this period may reconcile on its own.",
+      link: rowsLink(rows, `Show all ${rows.length} copies →`),
     });
   }
 
@@ -325,6 +350,8 @@ export async function reconcileAccounts(
   const storedTxns = earliestAnchor
     ? await db
         .select({
+          // Carried so a diagnosis can link straight to the rows it names.
+          id: schema.transactions.id,
           accountId: schema.transactions.accountId,
           date: schema.transactions.date,
           amountCents: schema.transactions.amountCents,
@@ -398,6 +425,7 @@ export async function reconcileAccounts(
   for (const t of storedTxns) {
     if (!txnsByAccount.has(t.accountId)) txnsByAccount.set(t.accountId, []);
     txnsByAccount.get(t.accountId)!.push({
+      id: t.id,
       date: t.date,
       amountCents: t.amountCents,
       description: t.description,
