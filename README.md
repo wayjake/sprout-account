@@ -54,6 +54,24 @@ back to a header-name heuristic and categorization uses merchant memory only.
   Previous / Next to walk the filtered register without closing the window.
   Committing an import drops you straight into that list, filtered to the
   account, dates, and still-uncategorized rows it just added.
+- **Bulk statement import** (beta): point at a *folder* of PDF statements and
+  leave it. Each one is read, matched to an account by the number printed on it —
+  or the account is created from the statement, since the statement is the only
+  thing that knows what it should be called — checked line by line against the
+  register, and everything the books are missing is added and categorized. On an
+  account with no history that means the statements become the ledger; on one
+  that already has rows only the gaps are filled, so re-running a folder that has
+  grown by a month is safe. Progress is live and resumable: leave the page and
+  come back, and Resume carries on from the next statement. Anything that isn't
+  a PDF is skipped and listed. A statement whose figures don't add up to the
+  balances printed on it, or whose closing balance contradicts one already on
+  file, is held back for you to look at on the Monthly Reconcile screen rather
+  than committed.
+- **Transfers to accounts you don't itemize**: a mortgage payment or a 401k
+  contribution has no opposite row to pair with, so it names the far *account*
+  instead. Those are now found for you when the description names the account and
+  reads like money moving, or when you've pointed the same merchant there before.
+  Anything less certain waits on the Transfers page as a suggestion.
 - **Spending classes**: every category is *base* (mortgage, utilities —
   the fixed foundation), *living* (groceries, gas — day-to-day needs),
   *luxury* (restaurants, shopping — discretionary), *income*, or *transfer*

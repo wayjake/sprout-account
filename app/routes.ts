@@ -25,6 +25,11 @@ export default [
       ...prefix("import", [
         index("routes/import.tsx"),
         route("session/:sessionId", "routes/import-session.tsx"),
+        // …a whole folder of statements comes in here, unattended…
+        ...prefix("bulk", [
+          index("routes/bulk-import.tsx"),
+          route(":sessionId", "routes/bulk-run.tsx"),
+        ]),
         route(":batchId/map", "routes/import-map.tsx"),
         route(":batchId", "routes/import-review.tsx"),
       ]),
@@ -49,4 +54,7 @@ export default [
   // Bulk edits from the register's selection. Action-only, and outside the
   // layouts above so a submission doesn't run the shell and pane loaders.
   route("api/transactions/bulk", "routes/api.transactions-bulk.ts"),
+  // The bulk import driver — one step per POST, posted to dozens of times in a
+  // row, so it stays outside the layouts too.
+  route("api/bulk/step", "routes/api.bulk-step.ts"),
 ] satisfies RouteConfig;

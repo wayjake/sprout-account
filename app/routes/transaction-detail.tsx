@@ -440,7 +440,7 @@ function TransferPicker({
   peerWindowDays,
   transferTargets,
 }: {
-  txn: { id: number; amountCents: number };
+  txn: { id: number; amountCents: number; account: { name: string } };
   transferCandidates: LoaderTransferData["transferCandidates"];
   pairTargets: LoaderTransferData["pairTargets"];
   peerCandidates: LoaderTransferData["peerCandidates"];
@@ -502,7 +502,10 @@ function TransferPicker({
               : ""
           }
         >
-          <Field label="Moved to / from another account">
+          {/* Named, not just "another account": the near side is this row's own
+              account and is deliberately absent from the list, which reads as a
+              missing account unless the list says what it is a list of. */}
+          <Field label={`Moved to / from — the far side of this ${txn.account.name} row`}>
             <select
               value={picked}
               onChange={(e) => setPicked(e.currentTarget.value)}

@@ -8,6 +8,7 @@ interface RunStats {
   fromMemory: number;
   fromAi: number;
   fromRule: number;
+  accountsLinked: number;
   blocked: number;
   lowConfidence: number;
 }
@@ -30,6 +31,7 @@ const ZERO: RunStats = {
   fromMemory: 0,
   fromAi: 0,
   fromRule: 0,
+  accountsLinked: 0,
   blocked: 0,
   lowConfidence: 0,
 };
@@ -133,6 +135,7 @@ export function useCategorizeRun() {
       fromMemory: prev.fromMemory + res.stats.fromMemory,
       fromAi: prev.fromAi + res.stats.fromAi,
       fromRule: prev.fromRule + res.stats.fromRule,
+      accountsLinked: prev.accountsLinked + res.stats.accountsLinked,
       blocked: prev.blocked + res.stats.blocked,
       lowConfidence: prev.lowConfidence + res.stats.lowConfidence,
     }));
@@ -234,6 +237,8 @@ export function CategorizeStatus({ run }: { run: CategorizeRun }) {
       and {stats.fromAi.toLocaleString()} with AI.
       {stats.fromRule > 0 &&
         ` ${stats.fromRule.toLocaleString()} card payments were matched by rule.`}
+      {stats.accountsLinked > 0 &&
+        ` ${stats.accountsLinked.toLocaleString()} were linked to a balance-only account as transfers.`}
       {stats.lowConfidence > 0 &&
         ` ${stats.lowConfidence.toLocaleString()} were left uncategorized (low confidence).`}
       {stats.blocked > 0 &&

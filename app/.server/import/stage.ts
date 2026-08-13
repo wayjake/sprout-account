@@ -9,7 +9,7 @@ import {
   lookupMemory,
   normalizeMerchant,
 } from "~/.server/categorize";
-import { autoLinkTransfers } from "~/.server/transfers";
+import { autoLinkAccountTransfers, autoLinkTransfers } from "~/.server/transfers";
 import type { PendingRows } from "~/.server/balances";
 import { accountLabel } from "~/lib/accounts";
 import { addDays, daysBetween } from "~/lib/dates";
@@ -26,21 +26,31 @@ const UPLOADS_DIR = path.join(
   "uploads",
 );
 
-export function saveUpload(batchId: number, buffer: Buffer) {
+/**
+ * Which queue a retained upload belongs to. A bulk run holds its statements
+ * before any batch exists to name them by — the file is uploaded, then read
+ * back a step later — so it needs a key of its own.
+ */
+export type UploadOwner = "batch" | "bulk";
+
+const uploadPath = (id: number, owner: UploadOwner = "batch") =>
+  path.join(UPLOADS_DIR, `${owner}-${id}`);
+
+export function saveUpload(id: number, buffer: Buffer, owner: UploadOwner = "batch") {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-  fs.writeFileSync(path.join(UPLOADS_DIR, `batch-${batchId}`), buffer);
+  fs.writeFileSync(uploadPath(id, owner), buffer);
 }
 
-export function readUpload(batchId: number): Buffer | null {
+export function readUpload(id: number, owner: UploadOwner = "batch"): Buffer | null {
   try {
-    return fs.readFileSync(path.join(UPLOADS_DIR, `batch-${batchId}`));
+    return fs.readFileSync(uploadPath(id, owner));
   } catch {
     return null;
   }
 }
 
-export function deleteUpload(batchId: number) {
-  fs.rmSync(path.join(UPLOADS_DIR, `batch-${batchId}`), { force: true });
+export function deleteUpload(id: number, owner: UploadOwner = "batch") {
+  fs.rmSync(uploadPath(id, owner), { force: true });
 }
 
 // --- staging ---
@@ -789,6 +799,8 @@ export interface CommitStats {
   skipped: number;
   autoCategorized: number;
   transfersLinked: number;
+  /** Legs pointed at a balance-only account, which never have a second leg. */
+  accountsLinked: number;
 }
 
 const emptyStats = (): CommitStats => ({
@@ -797,6 +809,7 @@ const emptyStats = (): CommitStats => ({
   skipped: 0,
   autoCategorized: 0,
   transfersLinked: 0,
+  accountsLinked: 0,
 });
 
 /**
@@ -834,63 +847,80 @@ export async function commitBatch(
   const allCategories = await db.select().from(schema.categories);
   const stats = emptyStats();
 
+  const balances: (typeof schema.balanceSnapshots.$inferInsert)[] = [];
+  const transactions: (typeof schema.transactions.$inferInsert)[] = [];
+  for (const row of included) {
+    if (row.rowKind === "balance") {
+      const data = JSON.parse(row.dataJson) as StagedBalanceData;
+      balances.push({
+        accountId: account.id,
+        date: data.date,
+        balanceCents: data.balanceCents,
+        source: "import",
+        importBatchId: batchId,
+      });
+      continue;
+    }
+
+    const data = JSON.parse(row.dataJson) as StagedTxnData;
+    const memoryHit = lookupMemory(data.merchant, memory);
+    // A credit on a card is a payment or a refund, never income — force or
+    // withhold the category regardless of what memory suggests.
+    const guarded = guardLiabilityCredit(
+      data,
+      account.accountType,
+      memoryHit?.categoryId ?? null,
+      allCategories,
+    );
+    const categoryId = guarded === undefined ? (memoryHit?.categoryId ?? null) : guarded;
+    const categorySource: schema.CategorySource | null =
+      categoryId == null ? null : guarded === undefined ? "memory" : "auto";
+    transactions.push({
+      accountId: account.id,
+      date: data.date,
+      amountCents: data.amountCents,
+      description: data.description,
+      merchant: data.merchant,
+      categoryId,
+      categorySource,
+      importBatchId: batchId,
+      dedupeHash: row.dedupeHash,
+    });
+  }
+
   await db.transaction(async (tx) => {
-    for (const row of included) {
-      if (row.rowKind === "balance") {
-        const data = JSON.parse(row.dataJson) as StagedBalanceData;
-        await tx.insert(schema.balanceSnapshots)
-          .values({
-            accountId: account.id,
-            date: data.date,
-            balanceCents: data.balanceCents,
+    // Turso-backed writes cross the network even when reads use the embedded
+    // replica. Keep each statement atomic, but send bounded multi-row writes
+    // instead of awaiting one remote statement for every ledger row.
+    const CHUNK = 100;
+    for (let i = 0; i < balances.length; i += CHUNK) {
+      const chunk = balances.slice(i, i + CHUNK);
+      await tx
+        .insert(schema.balanceSnapshots)
+        .values(chunk)
+        .onConflictDoUpdate({
+          target: [schema.balanceSnapshots.accountId, schema.balanceSnapshots.date],
+          set: {
+            balanceCents: sql`excluded.balance_cents`,
             source: "import",
             importBatchId: batchId,
-          })
-          .onConflictDoUpdate({
-            target: [schema.balanceSnapshots.accountId, schema.balanceSnapshots.date],
-            set: { balanceCents: data.balanceCents, source: "import", importBatchId: batchId },
-          })
-          .run();
-        stats.balancesRecorded++;
-        continue;
-      }
+          },
+        })
+        .run();
+      stats.balancesRecorded += chunk.length;
+    }
 
-      const data = JSON.parse(row.dataJson) as StagedTxnData;
-      const memoryHit = lookupMemory(data.merchant, memory);
-      // A credit on a card is a payment or a refund, never income — force or
-      // withhold the category regardless of what memory suggests.
-      const guarded = guardLiabilityCredit(
-        data,
-        account.accountType,
-        memoryHit?.categoryId ?? null,
-        allCategories,
-      );
-      const categoryId =
-        guarded === undefined ? (memoryHit?.categoryId ?? null) : guarded;
-      const categorySource: schema.CategorySource | null =
-        categoryId == null ? null : guarded === undefined ? "memory" : "auto";
+    for (let i = 0; i < transactions.length; i += CHUNK) {
+      const chunk = transactions.slice(i, i + CHUNK);
       const inserted = await tx
         .insert(schema.transactions)
-        .values({
-          accountId: account.id,
-          date: data.date,
-          amountCents: data.amountCents,
-          description: data.description,
-          merchant: data.merchant,
-          categoryId,
-          categorySource,
-          importBatchId: batchId,
-          dedupeHash: row.dedupeHash,
-        })
+        .values(chunk)
         .onConflictDoNothing()
-        .returning({ id: schema.transactions.id })
+        .returning({ categoryId: schema.transactions.categoryId })
         .all();
-      if (inserted.length > 0) {
-        stats.inserted++;
-        if (categoryId != null) stats.autoCategorized++;
-      } else {
-        stats.skipped++;
-      }
+      stats.inserted += inserted.length;
+      stats.skipped += chunk.length - inserted.length;
+      stats.autoCategorized += inserted.filter((row) => row.categoryId != null).length;
     }
 
     // Staged rows have served their purpose once committed
@@ -913,7 +943,11 @@ export async function commitBatch(
   // A session commit defers this until every file is in.
   if (opts.linkTransfers !== false && stats.inserted > 0) {
     stats.transfersLinked = await autoLinkTransfers();
-    if (stats.transfersLinked > 0) {
+    // Then the legs whose far side keeps no ledger and so can never be paired.
+    // After pairing, not before: a row with a real opposite leg should find it
+    // rather than be filed against an account.
+    stats.accountsLinked = await autoLinkAccountTransfers();
+    if (stats.transfersLinked > 0 || stats.accountsLinked > 0) {
       const prior = batch.statsJson ? JSON.parse(batch.statsJson) : {};
       await db
         .update(schema.importBatches)
@@ -937,20 +971,37 @@ export interface SessionCommitResult {
  * Commit every reviewed batch in a session, then link transfers once at the
  * end — a transfer's two legs often arrive in two different files of the same
  * upload, and pairing them per-file would miss them.
+ *
+ * `skipBatchIds` leaves named batches where they are, still in review. A bulk
+ * run uses it to hold back a statement whose extraction did not tie out to its
+ * own printed balances; the session stays open so those can be dealt with by
+ * hand on the reconcile screen.
  */
-export async function commitSession(sessionId: number): Promise<SessionCommitResult> {
+export async function commitSession(
+  sessionId: number,
+  opts: { skipBatchIds?: number[] } = {},
+): Promise<SessionCommitResult> {
   const batches = await db
     .select()
     .from(schema.importBatches)
     .where(eq(schema.importBatches.sessionId, sessionId))
     .orderBy(asc(schema.importBatches.id));
 
+  const skip = new Set(opts.skipBatchIds ?? []);
   const stats = emptyStats();
   const committedBatchIds: number[] = [];
   const blocked: SessionCommitResult["blocked"] = [];
 
   for (const batch of batches) {
     if (batch.status === "committed" || batch.status === "discarded") continue;
+    if (skip.has(batch.id)) {
+      blocked.push({
+        id: batch.id,
+        filename: batch.filename,
+        reason: "is held for review",
+      });
+      continue;
+    }
     if (batch.status === "mapping") {
       blocked.push({
         id: batch.id,
@@ -977,6 +1028,7 @@ export async function commitSession(sessionId: number): Promise<SessionCommitRes
 
   if (stats.inserted > 0) {
     stats.transfersLinked = await autoLinkTransfers();
+    stats.accountsLinked = await autoLinkAccountTransfers();
   }
 
   if (blocked.length === 0) {

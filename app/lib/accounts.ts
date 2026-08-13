@@ -105,17 +105,49 @@ export interface AccountHintCandidate {
 }
 
 /**
+ * Which signal a hint match rests on, strongest first. Callers that only route
+ * a file for the user to confirm can take any of them; a caller acting on the
+ * match by itself should insist on `last_four` or `name` — see
+ * `autoLinkAccountTransfers`, where an `institution` match on a brokerage *fee*
+ * would quietly file it as a contribution.
+ */
+export type HintStrength = "last_four" | "name" | "institution";
+
+export interface AccountHintMatch<T> {
+  account: T;
+  reason: string;
+  strength: HintStrength;
+}
+
+/**
  * Guess which account a file belongs to from a filename or a statement's
  * printed account number. Used to route a multi-file upload; always shown to
  * the user as a changeable choice rather than applied silently.
  *
  * Returns null when the evidence is ambiguous — two accounts matching equally
- * well is no better than no match.
+ * well is no better than no match. Callers that need to tell "nothing matched"
+ * from "several did" should use `matchAccountsByHint`, which is the same walk
+ * with the tie reported instead of discarded: a caller about to *create* an
+ * account has to know, because the answer to a tie is to ask, never to add a
+ * third candidate to it.
  */
 export function matchAccountByHint<T extends AccountHintCandidate>(
   accounts: T[],
   hint: string,
-): { account: T; reason: string } | null {
+): AccountHintMatch<T> | null {
+  const result = matchAccountsByHint(accounts, hint);
+  return result.kind === "match" ? result : null;
+}
+
+export type AccountHintResult<T> =
+  | (AccountHintMatch<T> & { kind: "match" })
+  | { kind: "ambiguous"; candidates: T[]; strength: HintStrength }
+  | { kind: "none" };
+
+export function matchAccountsByHint<T extends AccountHintCandidate>(
+  accounts: T[],
+  hint: string,
+): AccountHintResult<T> {
   const text = hint.toLowerCase();
 
   // Strongest signal: the account's last four as a standalone 4-digit run
@@ -128,22 +160,46 @@ export function matchAccountByHint<T extends AccountHintCandidate>(
     (a) => fourDigitRuns.has(a.lastFour!) || tails.has(a.lastFour!),
   );
   if (byLastFour.length === 1) {
-    return { account: byLastFour[0], reason: `matched ··${byLastFour[0].lastFour}` };
+    return {
+      kind: "match",
+      account: byLastFour[0],
+      reason: `matched ··${byLastFour[0].lastFour}`,
+      strength: "last_four",
+    };
+  }
+  if (byLastFour.length > 1) {
+    return { kind: "ambiguous", candidates: byLastFour, strength: "last_four" };
   }
 
   // Next: the account name appearing in the text
   const byName = accounts.filter(
     (a) => a.name.length >= 4 && text.includes(a.name.toLowerCase()),
   );
-  if (byName.length === 1) return { account: byName[0], reason: `matched "${byName[0].name}"` };
+  if (byName.length === 1) {
+    return {
+      kind: "match",
+      account: byName[0],
+      reason: `matched "${byName[0].name}"`,
+      strength: "name",
+    };
+  }
+  if (byName.length > 1) return { kind: "ambiguous", candidates: byName, strength: "name" };
 
   // Weakest: the institution, only useful when it picks out exactly one account
   const byInstitution = accounts.filter(
     (a) => a.institution.length >= 3 && text.includes(a.institution.toLowerCase()),
   );
   if (byInstitution.length === 1) {
-    return { account: byInstitution[0], reason: `matched ${byInstitution[0].institution}` };
+    return {
+      kind: "match",
+      account: byInstitution[0],
+      reason: `matched ${byInstitution[0].institution}`,
+      strength: "institution",
+    };
+  }
+  if (byInstitution.length > 1) {
+    return { kind: "ambiguous", candidates: byInstitution, strength: "institution" };
   }
 
-  return null;
+  return { kind: "none" };
 }

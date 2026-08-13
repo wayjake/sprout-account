@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 import fs from "node:fs";
 import path from "node:path";
-import { db, dbPath, rawClient, schema } from "~/.server/db";
+import { db, dbPath, isEmbeddedReplica, rawClient, schema } from "~/.server/db";
 import { STARTER_CATEGORIES } from "~/db/starter-categories";
 
 /**
@@ -18,6 +18,7 @@ const DATA_TABLES = [
   schema.transferRejections,
   schema.transactionSplits,
   schema.stagedRows,
+  schema.bulkFiles,
   schema.transactions,
   schema.balanceSnapshots,
   schema.csvMappings,
@@ -184,12 +185,15 @@ export async function clearDatabase(): Promise<void> {
     for (const table of DATA_TABLES) await tx.delete(table).run();
     await tx.insert(schema.categories).values(STARTER_CATEGORIES).run();
   });
-  // Best-effort space reclaim — an in-place VACUUM rewrites the replica's
-  // local file structure, which isn't guaranteed to be safe mid-sync, so a
-  // failure here must not undo the wipe above.
-  try {
-    await rawClient().execute("VACUUM");
-  } catch {
-    // ignore — the data wipe already committed
+  // VACUUM rewrites the database file. That is safe for a standalone local
+  // database, but not for an embedded replica: its file/WAL are owned by the
+  // replication engine, and rewriting them can make the next incoming frame
+  // fail with WalConflict. The primary will reclaim its own space separately.
+  if (!isEmbeddedReplica) {
+    try {
+      await rawClient().execute("VACUUM");
+    } catch {
+      // Best effort only — the data wipe already committed.
+    }
   }
 }

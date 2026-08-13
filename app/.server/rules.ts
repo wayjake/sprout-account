@@ -1,8 +1,10 @@
+import type { Client, Transaction } from "@libsql/client";
 import { sql } from "drizzle-orm";
+import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 import crypto from "node:crypto";
 import { z } from "zod";
 import { normalizeMerchant } from "~/.server/categorize";
-import { db, schema } from "~/.server/db";
+import { db, rawClient, schema } from "~/.server/db";
 import { SPENDING_CLASSES } from "~/db/schema";
 
 /**
@@ -92,11 +94,21 @@ const rulesFileSchema = z.object({
 
 export type RulesFile = z.infer<typeof rulesFileSchema>;
 
-export async function exportRules(): Promise<RulesFile> {
-  const [categories, memory] = await Promise.all([
+export interface ExportRulesOptions {
+  /**
+   * Export only `user`-sourced merchant rules — the hand-made judgements —
+   * leaving the AI's guesses behind. Categories are unaffected: they carry no
+   * source, and a user rule may point at a category only the AI has used yet.
+   */
+  userOnly?: boolean;
+}
+
+export async function exportRules({ userOnly = false }: ExportRulesOptions = {}): Promise<RulesFile> {
+  const [categories, allMemory] = await Promise.all([
     db.select().from(schema.categories),
     db.select().from(schema.merchantMemory),
   ]);
+  const memory = userOnly ? allMemory.filter((m) => m.source === "user") : allMemory;
   const nameById = new Map(categories.map((c) => [c.id, c.name]));
 
   return {
@@ -157,11 +169,83 @@ export interface RulesImportResult {
 
 /** Multi-row insert chunk — keeps the bound-parameter count well under SQLite's cap. */
 const CHUNK = 150;
+const IMPORT_TRANSACTION_ATTEMPTS = 4;
 
 function chunked<T>(rows: T[]): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < rows.length; i += CHUNK) out.push(rows.slice(i, i + CHUNK));
   return out;
+}
+
+function isRetryableWriteConflict(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error) {
+      const details = current as Error & {
+        code?: unknown;
+        extendedCode?: unknown;
+        cause?: unknown;
+      };
+      const text = [
+        details.name,
+        details.message,
+        details.code,
+        details.extendedCode,
+      ]
+        .filter((part) => part != null)
+        .join(" ")
+        .toLowerCase();
+      if (
+        text.includes("walconflict") ||
+        text.includes("wal conflict") ||
+        text.includes("sqlite_busy") ||
+        text.includes("sqlite_locked")
+      ) {
+        return true;
+      }
+      current = details.cause;
+      continue;
+    }
+    break;
+  }
+
+  return false;
+}
+
+async function withRulesImportTransaction<T>(
+  operation: (tx: LibSQLDatabase<typeof schema>) => Promise<T>,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < IMPORT_TRANSACTION_ATTEMPTS; attempt++) {
+    let transaction: Transaction | undefined;
+
+    try {
+      transaction = await rawClient().transaction("write");
+      // Drizzle only uses execute/batch here; the libSQL Transaction implements
+      // those methods but is intentionally narrower than Client in its typings.
+      const tx = drizzle(transaction as unknown as Client, { schema });
+      const result = await operation(tx);
+      await transaction.commit();
+      return result;
+    } catch (error) {
+      if (!isRetryableWriteConflict(error)) throw error;
+      lastError = error;
+    } finally {
+      // close() is safe after commit or an automatic rollback. Drizzle 0.45's
+      // rollback call is not, and can mask WalConflict as TRANSACTION_CLOSED.
+      transaction?.close();
+    }
+
+    if (attempt + 1 < IMPORT_TRANSACTION_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, 25 * 3 ** attempt));
+    }
+  }
+
+  throw lastError;
 }
 
 export function parseRulesFile(text: string): RulesFile | { error: string } {
@@ -216,22 +300,22 @@ export async function importRules(
   file: RulesFile,
   mode: ImportMode,
 ): Promise<RulesImportResult> {
-  const result: RulesImportResult = {
-    categoriesCreated: 0,
-    categoriesMatched: 0,
-    memoryAdded: 0,
-    memoryUpdated: 0,
-    memoryUnchanged: 0,
-    memoryKeptUser: 0,
-    memoryRemoved: 0,
-    normalizerWarning:
-      file.merchantKeyFingerprint && file.merchantKeyFingerprint !== merchantKeyFingerprint()
-        ? "This file was exported by a build whose merchant keys are built differently. " +
-          "The rules were loaded, but some may no longer match anything until they are re-saved from a transaction."
-        : null,
-  };
+  return withRulesImportTransaction(async (tx) => {
+    const result: RulesImportResult = {
+      categoriesCreated: 0,
+      categoriesMatched: 0,
+      memoryAdded: 0,
+      memoryUpdated: 0,
+      memoryUnchanged: 0,
+      memoryKeptUser: 0,
+      memoryRemoved: 0,
+      normalizerWarning:
+        file.merchantKeyFingerprint && file.merchantKeyFingerprint !== merchantKeyFingerprint()
+          ? "This file was exported by a build whose merchant keys are built differently. " +
+            "The rules were loaded, but some may no longer match anything until they are re-saved from a transaction."
+          : null,
+    };
 
-  await db.transaction(async (tx) => {
     // ---- Categories: match on name, create what's missing -------------------
     const existingCategories = await tx.select().from(schema.categories);
     const idByName = new Map(
@@ -351,7 +435,6 @@ export async function importRules(
         })
         .run();
     }
+    return result;
   });
-
-  return result;
 }

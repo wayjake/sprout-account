@@ -107,11 +107,61 @@ export const transactions = sqliteTable(
   (t) => [
     uniqueIndex("txn_account_dedupe_idx").on(t.accountId, t.dedupeHash),
     index("txn_date_id_idx").on(t.date, t.id),
-    index("txn_account_date_idx").on(t.accountId, t.date),
+    /**
+     * The account-scoped workhorse: the register's `account=` filter, the
+     * statement match window, soft-duplicate detection, and the per-account
+     * activity sums.
+     *
+     * `id` sits third so `order by date desc, id desc` — the register's
+     * ordering, and `neighborTransactions`' — stays index-ordered; putting
+     * `amountCents` there instead costs a temp b-tree sort on every filtered
+     * page. `amountCents` last makes the index *cover* `clearedWindows`'
+     * per-day sums, which the register runs on every page load and every
+     * transaction-detail hit: measured at 50k rows, that is 24ms → 5.6ms.
+     */
+    index("txn_account_date_amount_idx").on(
+      t.accountId,
+      t.date,
+      t.id,
+      t.amountCents,
+    ),
     index("txn_category_idx").on(t.categoryId),
     index("txn_merchant_idx").on(t.merchant),
     index("txn_transfer_peer_idx").on(t.transferPeerId),
-    index("txn_transfer_account_idx").on(t.transferAccountId),
+    /**
+     * Both halves of the far-side-account link: `reconcileAccounts` reading a
+     * balance account's contributions, and `accountLinkCandidates` asking what
+     * a merchant in an account has been pointed at before.
+     *
+     * **The partial clause is load-bearing.** Almost every row has a null
+     * `transferAccountId`, and a full index of mostly-null entries looks
+     * expensive enough that the planner falls back to scanning the table —
+     * measured, the same query is 0.01ms partial against 3.0ms plain. It also
+     * keeps the index at the few hundred rows that are actually linked.
+     *
+     * Being partial, it cannot serve a `transferAccountId is null` lookup the
+     * way the full index it replaced could. Nothing needs one today because
+     * `txn_amount_idx` took over the transfer self-join's access path — so
+     * dropping *that* index would regress the join twice over, once directly
+     * and once by leaving this side with no usable index either.
+     *
+     * `drizzle-kit push` cannot round-trip this `where` clause and so drops and
+     * recreates the index on every run (~6ms, harmless — see CLAUDE.md). No
+     * spelling avoids it: bare, double-quoted and backtick-quoted were all
+     * measured, so don't go hunting for one.
+     */
+    index("txn_transfer_target_idx")
+      .on(t.transferAccountId, t.accountId, t.merchant)
+      .where(sql`\`transfer_account_id\` is not null`),
+    /**
+     * `rawCandidatePairs` joins the ledger to itself on `i.amount_cents =
+     * -o.amount_cents`. That is an ordinary equality lookup against the inner
+     * row, so it indexes — without this SQLite builds a transient index of the
+     * whole table on every call, which is the bulk of a 35ms query.
+     */
+    index("txn_amount_idx").on(t.amountCents),
+    /** `importedRegisterSearch`, framing the register on what a commit added. */
+    index("txn_import_batch_idx").on(t.importBatchId),
   ],
 );
 

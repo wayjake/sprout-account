@@ -61,6 +61,16 @@ export interface StatementClose {
   priorWarning: string | null;
   accountAssignment: string | null;
   extractionProblems: string[];
+  /**
+   * What the statement printed about whose account it is. Kept so the review
+   * screen can offer to create the account when the guess was only a fallback —
+   * the statement is the only thing that knows what it should be called.
+   */
+  identity: {
+    accountLastFour: string | null;
+    institutionName: string | null;
+    accountName: string | null;
+  } | null;
   committed: {
     inserted: number;
     balancesRecorded: number;
@@ -179,6 +189,7 @@ export async function statementCloses(sessionId: number): Promise<StatementClose
         priorWarning: (stats.priorWarning ?? null) as string | null,
         accountAssignment: (stats.accountAssignment ?? null) as string | null,
         extractionProblems: (stats.extractionProblems ?? []) as string[],
+        identity: (stats.identity ?? null) as StatementClose["identity"],
         committed:
           batch.status === "committed"
             ? {

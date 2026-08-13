@@ -55,11 +55,14 @@ export async function action({ request }: Route.ActionArgs) {
     const [{ max }] = await db
       .select({ max: sql<number | null>`max(${schema.accounts.sortOrder})` })
       .from(schema.accounts);
-    await db.insert(schema.accounts).values({
-      ...parsed.fields,
-      sortOrder: (max ?? 0) + 1,
-    });
-    return { ok: "create" } satisfies PaneActionResult;
+    // The new id rides back so a caller that created this account in order to
+    // put something in it — a statement whose account did not exist yet — can
+    // point at it straight away. The Accounts pane ignores it.
+    const [created] = await db
+      .insert(schema.accounts)
+      .values({ ...parsed.fields, sortOrder: (max ?? 0) + 1 })
+      .returning({ id: schema.accounts.id });
+    return { ok: "create", accountId: created.id } satisfies PaneActionResult;
   }
 
   const id = Number(form.get("id"));

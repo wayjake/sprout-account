@@ -1,9 +1,12 @@
 import { Link, data, useFetcher } from "react-router";
 import {
+  accountLinkSuggestions,
   accountLinkedTransfers,
+  autoLinkAccountTransfers,
   autoLinkTransfers,
   findTransferSuggestions,
   linkTransferPair,
+  linkTransferToAccount,
   linkedTransfers,
   rejectTransferPair,
   transferVolume,
@@ -23,15 +26,29 @@ export function meta() {
 
 export async function loader(_: Route.LoaderArgs) {
   const month = monthOf(todayISO());
-  const [suggestions, linked, unmatched, accountLinked, monthMovedCents] =
-    await Promise.all([
-      findTransferSuggestions(),
-      linkedTransfers(),
-      unmatchedTransferLegs(),
-      accountLinkedTransfers(),
-      transferVolume(monthStart(month), monthEnd(month)),
-    ]);
-  return { suggestions, linked, unmatched, accountLinked, monthMovedCents };
+  const [
+    suggestions,
+    linked,
+    unmatched,
+    accountLinked,
+    accountSuggestions,
+    monthMovedCents,
+  ] = await Promise.all([
+    findTransferSuggestions(),
+    linkedTransfers(),
+    unmatchedTransferLegs(),
+    accountLinkedTransfers(),
+    accountLinkSuggestions(),
+    transferVolume(monthStart(month), monthEnd(month)),
+  ]);
+  return {
+    suggestions,
+    linked,
+    unmatched,
+    accountLinked,
+    accountSuggestions,
+    monthMovedCents,
+  };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -63,9 +80,20 @@ export async function action({ request }: Route.ActionArgs) {
     return { ok: true };
   }
 
+  if (intent === "link-account") {
+    const error = await linkTransferToAccount(
+      Number(form.get("id")),
+      Number(form.get("accountId")),
+      "user",
+    );
+    if (error) return data({ error }, { status: 400 });
+    return { ok: true };
+  }
+
   if (intent === "scan") {
-    const linked = await autoLinkTransfers();
-    return { scanned: linked };
+    const pairs = await autoLinkTransfers();
+    const accounts = await autoLinkAccountTransfers();
+    return { scanned: pairs + accounts };
   }
 
   return data({ error: "Unknown intent" }, { status: 400 });
@@ -114,7 +142,14 @@ function PairRow({
 }
 
 export default function Transfers({ loaderData }: Route.ComponentProps) {
-  const { suggestions, linked, unmatched, accountLinked, monthMovedCents } = loaderData;
+  const {
+    suggestions,
+    linked,
+    unmatched,
+    accountLinked,
+    accountSuggestions,
+    monthMovedCents,
+  } = loaderData;
   const fetcher = useFetcher<{ error?: string; scanned?: number }>();
   const busy = fetcher.state !== "idle";
 
@@ -200,6 +235,62 @@ export default function Transfers({ loaderData }: Route.ComponentProps) {
           </ul>
         )}
       </Card>
+
+      {accountSuggestions.length > 0 && (
+        <Card>
+          <CardHeader
+            title={`🏦 Possible balance-only transfers (${accountSuggestions.length})`}
+          />
+          <div className="bg-ledger">
+            <p className="groove m-2 bg-[#fff7dd] px-3 py-1.5 text-[11px] text-gray-700">
+              Each of these mentions an account that keeps no ledger of its own, but not
+              clearly enough to link without asking — the wording doesn't read like money
+              moving, or only the institution matched. Linking one files it as a transfer
+              and counts it as money paid into that account.
+            </p>
+            <ul className="ledger-stripes divide-y divide-primary-50">
+              {accountSuggestions.map((s) => (
+                <li key={s.id} className="flex items-center gap-3 px-3 py-1.5">
+                  <span className="w-24 shrink-0 font-mono text-[10px] text-gray-500">
+                    {formatDate(s.date)}
+                  </span>
+                  <span className="w-36 shrink-0 truncate text-[11px] font-bold text-gray-800">
+                    {s.accountName} → {s.targetAccountName}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <Link
+                      to={`/transactions/${s.id}`}
+                      className="block truncate text-[11px] text-gray-700 hover:text-primary-700 hover:underline"
+                      title={s.description}
+                    >
+                      {s.description}
+                    </Link>
+                    <span className="block truncate text-[10px] text-gray-500">
+                      {s.reason}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-mono text-[11px] tabular-nums text-gray-800">
+                    {formatCentsAbs(s.amountCents)}
+                  </span>
+                  <fetcher.Form method="post">
+                    <input type="hidden" name="intent" value="link-account" />
+                    <input type="hidden" name="id" value={s.id} />
+                    <input type="hidden" name="accountId" value={s.targetAccountId} />
+                    <Button
+                      type="submit"
+                      size="sm"
+                      disabled={busy}
+                      title={`Point this at ${s.targetAccountName}`}
+                    >
+                      🏦 Link
+                    </Button>
+                  </fetcher.Form>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </Card>
+      )}
 
       {unmatched.length > 0 && (
         <Card>

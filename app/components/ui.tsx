@@ -105,6 +105,28 @@ export function CardHeader({
   );
 }
 
+/**
+ * A small standing label — "BETA" on a feature still finding its feet. Not a
+ * status: a status changes as you use the screen, this one is a property of the
+ * screen itself, so it sits in the title bar and stays put.
+ */
+export function Badge({
+  children,
+  title,
+}: {
+  children: React.ReactNode;
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      className="bevel-out bg-class-luxury px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide text-white"
+    >
+      {children}
+    </span>
+  );
+}
+
 /** White inner surface for window content. */
 export function CardBody({
   children,

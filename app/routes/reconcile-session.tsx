@@ -1,5 +1,5 @@
 import { Form, Link, data, redirect, useFetcher, useNavigation } from "react-router";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db, schema } from "~/.server/db";
 import { reconcileAccounts } from "~/.server/balances";
 import { reassignBatch } from "~/.server/import/intake";
@@ -14,7 +14,21 @@ import {
 import { importedRegisterSearch } from "~/.server/queries";
 import { statementCloses, type StatementClose } from "~/.server/reconcile";
 import { ReconcilePanel } from "~/components/reconciliation";
-import { Amount, Button, Card, CardHeader, EmptyState, selectClass } from "~/components/ui";
+import {
+  Amount,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  inputClass,
+  selectClass,
+} from "~/components/ui";
+import {
+  ACCOUNT_TYPE_LABELS,
+  isAccountType,
+  resolveAccountKind,
+} from "~/lib/accounts";
+import { ACCOUNT_TYPES } from "~/db/schema";
 import { formatDate, formatDateRange } from "~/lib/dates";
 import { formatCents } from "~/lib/money";
 import type { Route } from "./+types/reconcile-session";
@@ -30,7 +44,10 @@ export async function loader({ params }: Route.LoaderArgs) {
   });
   if (!session) throw data("Close not found", { status: 404 });
   // A CSV upload landing here would be reviewed with the wrong screen entirely.
-  if (session.purpose !== "reconcile") {
+  // A bulk run, on the other hand, belongs here as much as a close does — this
+  // is the screen its held statements link to, and the only one that can commit
+  // them once they have been looked at.
+  if (session.purpose === "import") {
     throw redirect(`/import/session/${sessionId}`);
   }
 
@@ -125,6 +142,44 @@ export async function action({ params, request }: Route.ActionArgs) {
     return { ok: true };
   }
 
+  // The statement belongs to an account that doesn't exist yet. Everything the
+  // new account needs is printed on it, so make it and point the batch there in
+  // one go rather than sending the user off to the Accounts pane and back.
+  if (intent === "create-account") {
+    const batchId = Number(form.get("batchId"));
+    const name = String(form.get("name") ?? "").trim();
+    const institution = String(form.get("institution") ?? "").trim();
+    const accountType = form.get("accountType");
+    const lastFour = String(form.get("lastFour") ?? "").trim() || null;
+    if (!batchId) return data({ error: "Statement not found." }, { status: 400 });
+    if (!name || !institution) {
+      return data({ error: "The account needs a name and an institution." }, { status: 400 });
+    }
+    if (!isAccountType(accountType)) {
+      return data({ error: "Pick an account type." }, { status: 400 });
+    }
+    if (lastFour && !/^\d{4}$/.test(lastFour)) {
+      return data({ error: "Last four digits must be exactly four numbers." }, { status: 400 });
+    }
+    const [{ max }] = await db
+      .select({ max: sql<number | null>`max(${schema.accounts.sortOrder})` })
+      .from(schema.accounts);
+    const [created] = await db
+      .insert(schema.accounts)
+      .values({
+        name,
+        institution,
+        accountType,
+        kind: resolveAccountKind(accountType, form.get("kind")),
+        lastFour,
+        sortOrder: (max ?? 0) + 1,
+      })
+      .returning({ id: schema.accounts.id });
+    await reassignBatch(batchId, created.id);
+    await dedupeSessionBatches(sessionId);
+    return { ok: true };
+  }
+
   if (intent === "discard-batch") {
     await discardBatch(Number(form.get("batchId")));
     return { ok: true };
@@ -162,6 +217,87 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   return data({ error: "Unknown intent" }, { status: 400 });
+}
+
+/**
+ * Offered when nothing about the statement pointed at an account, so it landed
+ * on the fallback the upload named. Usually that means the account it belongs
+ * to hasn't been created — and the statement is the only thing that knows what
+ * it should be called, so the fields come pre-filled from what was printed on
+ * it. Collapsed by default: a fallback is often perfectly correct.
+ */
+function CreateAccountOffer({
+  close,
+  fetcher,
+}: {
+  close: StatementClose;
+  fetcher: ReturnType<typeof useFetcher>;
+}) {
+  const identity = close.identity;
+  // No transactions on the statement is what a brokerage or pension statement
+  // looks like: a value at each end of the period and nothing in between.
+  const balanceOnly = close.rows.length === 0;
+  return (
+    <details className="groove bg-primary-50 px-2 py-1 text-[11px]">
+      <summary className="cursor-pointer text-gray-700">
+        Nothing on this statement matched an account — it's filed under the fallback.
+        Create the account it belongs to?
+      </summary>
+      <fetcher.Form method="post" className="mt-2 flex flex-wrap items-end gap-2">
+        <input type="hidden" name="intent" value="create-account" />
+        <input type="hidden" name="batchId" value={close.batchId} />
+        <label className="flex flex-col gap-0.5">
+          <span className="text-[10px] font-bold uppercase text-primary-800">Name</span>
+          <input
+            name="name"
+            required
+            defaultValue={identity?.accountName ?? ""}
+            className={`${inputClass} w-40 py-[1px] text-[11px]`}
+          />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-[10px] font-bold uppercase text-primary-800">
+            Institution
+          </span>
+          <input
+            name="institution"
+            required
+            defaultValue={identity?.institutionName ?? ""}
+            className={`${inputClass} w-36 py-[1px] text-[11px]`}
+          />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-[10px] font-bold uppercase text-primary-800">Type</span>
+          <select
+            name="accountType"
+            defaultValue={balanceOnly ? "investment" : "checking"}
+            className={`${selectClass} py-[1px] text-[11px]`}
+          >
+            {ACCOUNT_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {ACCOUNT_TYPE_LABELS[t]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="text-[10px] font-bold uppercase text-primary-800">
+            Last four
+          </span>
+          <input
+            name="lastFour"
+            inputMode="numeric"
+            maxLength={4}
+            defaultValue={identity?.accountLastFour ?? ""}
+            className={`${inputClass} w-16 py-[1px] text-[11px]`}
+          />
+        </label>
+        <Button type="submit" size="sm" disabled={fetcher.state !== "idle"}>
+          Create and use
+        </Button>
+      </fetcher.Form>
+    </details>
+  );
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -565,6 +701,9 @@ export default function ReconcileSession({
 
               {c.accountAssignment && c.status === "review" && (
                 <p className="text-[11px] italic text-gray-500">{c.accountAssignment}</p>
+              )}
+              {c.status === "review" && !c.accountAssignment && (
+                <CreateAccountOffer close={c} fetcher={fetcher} />
               )}
               {c.priorWarning && (
                 <p className="groove bg-[#fff7dd] px-2 py-1 text-[11px] text-class-living">

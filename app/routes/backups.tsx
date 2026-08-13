@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Form, data, useFetcher, useNavigation } from "react-router";
 import {
   clearDatabase,
@@ -134,6 +135,7 @@ export default function Backups({ loaderData, actionData }: Route.ComponentProps
   const fetcher = useFetcher();
   const navigation = useNavigation();
   const busy = navigation.state === "submitting";
+  const [exportUserOnly, setExportUserOnly] = useState(false);
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -263,14 +265,23 @@ export default function Backups({ loaderData, actionData }: Route.ComponentProps
               <p className="text-xs text-gray-500">
                 Downloads a .json file of every category and merchant rule.
               </p>
+              <label className="mt-1.5 flex items-center gap-2 text-[12px] text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={exportUserOnly}
+                  onChange={(e) => setExportUserOnly(e.target.checked)}
+                />
+                Only rules I set myself — leave out the AI's guesses
+              </label>
             </div>
             {/*
               A plain link, not a form: the response *is* the file. `Button`
               renders a real <button> and an <a> may not contain one, so the
-              anchor wears the bevel classes itself.
+              anchor wears the bevel classes itself. The checkbox is client
+              state folded into the href, so the link stays a link.
             */}
             <a
-              href="/api/rules/export"
+              href={exportUserOnly ? "/api/rules/export?source=user" : "/api/rules/export"}
               download
               className="bevel-btn inline-flex shrink-0 items-center justify-center gap-1.5 px-4 py-[5px] text-[12px] text-black no-underline"
             >

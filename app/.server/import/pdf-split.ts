@@ -78,6 +78,31 @@ export async function splitPdfPages(buffer: Buffer): Promise<PdfChunk[]> {
 }
 
 /**
+ * Just page 1, for the identify pass — the institution, the account number and
+ * the period are printed there, and none of the rows are wanted.
+ *
+ * `splitPdfPages` is no substitute: it hands back the whole file as a single
+ * chunk at `SPLIT_ABOVE_PAGES` or fewer, so asking it for a "first chunk" would
+ * send an entire short statement to be read for two fields.
+ *
+ * Falls back to the whole file when the PDF cannot be parsed, exactly as
+ * `splitPdfPages` does — a damaged file is extraction's problem to report, not
+ * a reason to fail before it is even looked at.
+ */
+export async function firstPageOnly(buffer: Buffer): Promise<Buffer> {
+  try {
+    const src = await PDFDocument.load(buffer, { ignoreEncryption: true });
+    if (src.getPageCount() <= 1) return buffer;
+    const doc = await PDFDocument.create();
+    const [page] = await doc.copyPages(src, [0]);
+    doc.addPage(page);
+    return Buffer.from(await doc.save());
+  } catch {
+    return buffer;
+  }
+}
+
+/**
  * Run `worker` over every item with at most `limit` in flight, preserving input
  * order in the result. Extraction is one network call per chunk: firing twenty
  * at once invites the rate limiting that degrades a response into a plausible

@@ -13,7 +13,12 @@ import {
   stageBatchRows,
 } from "~/.server/import/stage";
 import { AiError } from "~/.server/openrouter";
-import { accountLabel, matchAccountByHint } from "~/lib/accounts";
+import {
+  accountLabel,
+  matchAccountByHint,
+  matchAccountsByHint,
+  type HintStrength,
+} from "~/lib/accounts";
 import { applyMapping } from "~/lib/csv-mapping";
 import type { Account } from "~/db/schema";
 
@@ -25,10 +30,25 @@ export interface IntakeResult {
   accountId: number | null;
   accountAssignment: string | null;
   error?: string;
+  /** The extraction disagrees with the balances it printed — see `finalize`. */
+  blocked?: boolean;
 }
 
 export function isPdf(file: { name: string; type?: string }): boolean {
   return file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+}
+
+/**
+ * A file to take in. Uploads arrive as `File`; a bulk run has already written
+ * its statements to disk and reads them back as bytes, and making it rebuild a
+ * `File` around each one would copy every statement in memory for nothing.
+ */
+export type IntakeFile = File | { name: string; buffer: Buffer };
+
+async function readIntake(file: IntakeFile) {
+  const buffer =
+    file instanceof File ? Buffer.from(await file.arrayBuffer()) : file.buffer;
+  return { name: file.name, buffer };
 }
 
 function refused(filename: string, error: string): IntakeResult {
@@ -62,6 +82,134 @@ function accountFromFilename(accounts: Account[], filename: string, fallback: Ac
   };
 }
 
+/** What a statement says about whose account it is. */
+export interface StatementIdentity {
+  accountLastFour: string | null;
+  institutionName: string | null;
+  accountName: string | null;
+  /** Who the statement is addressed to, as printed — see `identifyStatement`. */
+  accountHolder?: string | null;
+}
+
+export type StatementAccountResolution =
+  /** `strength` is which signal carried it — a caller acting unattended should
+   *  treat an `institution` match as a lead, not an answer. */
+  | { kind: "match"; account: Account; reason: string; strength: HintStrength }
+  /** Several accounts fit equally well — a question, never a new account. */
+  | { kind: "ambiguous"; candidates: Account[]; reason: string }
+  | { kind: "none" };
+
+/**
+ * Which existing account a statement belongs to, on the evidence of what is
+ * printed on it. Tried strongest first: the account number, then the name the
+ * statement gives the account, then the institution — and the filename last,
+ * since it is whatever the bank's download button happened to call the file.
+ *
+ * A tie is reported rather than discarded. "Apple Card" as an institution
+ * matches both "Apple (Jake)" and "Apple (Becca)"; treating that as "no match"
+ * is how a folder of Apple Card statements ended up creating a *third* Apple
+ * account. Nothing matching and everything matching call for opposite
+ * responses, so the caller has to be able to tell them apart.
+ */
+export function resolveStatementAccount(
+  accounts: Account[],
+  hints: StatementIdentity & { filename?: string },
+): StatementAccountResolution {
+  // An account that has learned its number can never be the account of a
+  // statement that prints a different one. Excluding those up front is what
+  // makes the weaker probes exact: without it, a name or institution hit lands
+  // happily on a sibling account at the same bank — the case the numbers exist
+  // to tell apart. An account with no number recorded stays in; it may just
+  // not have learned its own yet.
+  const printed = /^\d{4}$/.test(hints.accountLastFour ?? "") ? hints.accountLastFour : null;
+  const candidates = printed
+    ? accounts.filter((a) => !a.lastFour || a.lastFour === printed)
+    : accounts;
+
+  const probes: { text: string; source: string }[] = [
+    { text: hints.accountLastFour ?? "", source: "the statement" },
+    { text: hints.accountName ?? "", source: "the statement" },
+    { text: hints.institutionName ?? "", source: "the statement" },
+    { text: hints.filename ?? "", source: "filename" },
+  ];
+  let weak: Extract<StatementAccountResolution, { kind: "match" }> | null = null;
+  let tie: Extract<StatementAccountResolution, { kind: "ambiguous" }> | null = null;
+  for (const probe of probes) {
+    if (!probe.text) continue;
+    const hit = matchAccountsByHint(candidates, probe.text);
+    if (hit.kind === "match") {
+      if (hit.strength !== "institution") {
+        return {
+          kind: "match",
+          account: hit.account,
+          reason: `From ${probe.source} — ${hit.reason}`,
+          strength: hit.strength,
+        };
+      }
+      // An institution names a bank, not an account. Hold it rather than
+      // return it: a later probe or the printed holder below may still land
+      // something exact, and the caller treats an institution match as a lead
+      // to be corroborated, not an answer.
+      if (!weak) {
+        weak = {
+          kind: "match",
+          account: hit.account,
+          reason: `From ${probe.source} — ${hit.reason}`,
+          strength: hit.strength,
+        };
+      }
+    }
+    // Keep looking — a weaker probe can still land an outright match, and one
+    // often does. The first tie is only the answer if nothing else works out.
+    if (hit.kind === "ambiguous" && !tie) {
+      tie = {
+        kind: "ambiguous",
+        candidates: hit.candidates,
+        reason: `${probe.text.trim()} fits ${hit.candidates.length} accounts equally well`,
+      };
+    }
+  }
+
+  // The holder printed on the statement decides what the probes above could
+  // not: "Apple Card" fits both family cards, "Jacob" fits one — and a
+  // statement that prints no number at all often prints its holder on every
+  // page. But the holder is only ever a tiebreaker, never evidence on its
+  // own: nearly every statement in a household is addressed to the same one
+  // or two people, so the first statement from an institution with no
+  // account on file must not land on an unrelated account that happens to
+  // carry the holder's name — a Robinhood card addressed to Jake is not
+  // "Jake's Apple Card". The holder therefore chooses only among accounts
+  // some other probe already implicated: it confirms the lone institution
+  // hit or breaks a tie, and when nothing else matched anything, it decides
+  // nothing. A word of the printed holder — a name, or the local part of an
+  // email — appearing in exactly one implicated account's name settles the
+  // match. Anything else (no word hits, or a word two names share) changes
+  // nothing, and generic email furniture is excluded so "…@x.com" can't hit
+  // an account with "com" somewhere in its name.
+  if (hints.accountHolder) {
+    const implicated = new Map<number, Account>();
+    for (const a of tie?.candidates ?? []) implicated.set(a.id, a);
+    if (weak) implicated.set(weak.account.id, weak.account);
+    const words = hints.accountHolder
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 3 && !/^(com|net|org|edu|www|mail|email)$/.test(w));
+    const byHolder = [...implicated.values()].filter((a) =>
+      words.some((w) => a.name.toLowerCase().includes(w)),
+    );
+    if (byHolder.length === 1) {
+      return {
+        kind: "match",
+        account: byHolder[0],
+        reason: `From the statement — addressed to the holder of "${byHolder[0].name}"`,
+        strength: "name",
+      };
+    }
+  }
+
+  return weak ?? tie ?? { kind: "none" };
+}
+
 /**
  * Take one uploaded PDF statement as far as it can go: work out which account
  * it belongs to, extract its transactions and bracketing balances, and stage
@@ -73,33 +221,47 @@ function accountFromFilename(accounts: Account[], filename: string, fallback: Ac
  */
 export async function intakeStatement(input: {
   sessionId: number;
-  file: File;
+  file: IntakeFile;
   defaultAccount: Account;
   accounts: Account[];
+  /**
+   * The account this statement belongs to, already settled by the caller. A
+   * bulk run resolves the account from a cheap identify pass — and may have
+   * created it — before it gets here, so there is nothing left to guess.
+   */
+  account?: Account;
+  accountAssignment?: string | null;
 }): Promise<IntakeResult> {
-  const { sessionId, file, defaultAccount, accounts } = input;
-  if (!isPdf(file)) {
+  const { sessionId, defaultAccount, accounts } = input;
+  if (!isPdf(input.file)) {
     return refused(
-      file.name,
+      input.file.name,
       "Only PDF statements belong in a month-end close — send transaction exports to Transaction Import.",
     );
   }
 
+  const { name: filename, buffer } = await readIntake(input.file);
   try {
-    const buffer = Buffer.from(await file.arrayBuffer());
     const fileHash = sha256(buffer);
 
-    let { account, assignment } = accountFromFilename(accounts, file.name, defaultAccount);
+    let account = input.account ?? defaultAccount;
+    let assignment = input.account
+      ? (input.accountAssignment ?? null)
+      : accountFromFilename(accounts, filename, defaultAccount).assignment;
+    if (!input.account) {
+      account = accountFromFilename(accounts, filename, defaultAccount).account;
+    }
 
     const prior = await findPriorCommit(fileHash);
     const priorWarning = prior
       ? `This exact statement was already used in a close as "${prior.filename}" (batch #${prior.id}).`
       : null;
 
-    const extraction = await extractFromPdf(buffer, file.name, account);
+    const extraction = await extractFromPdf(buffer, filename, account);
 
-    // The statement's own account number beats a filename guess
-    if (extraction.accountLastFour) {
+    // The statement's own account number beats a filename guess — but not a
+    // caller who has already settled the question.
+    if (!input.account && extraction.accountLastFour) {
       const fromStatement = matchAccountByHint(accounts, extraction.accountLastFour);
       if (fromStatement && fromStatement.account.id !== account.id) {
         account = fromStatement.account;
@@ -122,13 +284,22 @@ export async function intakeStatement(input: {
             ? "transactions"
             : "balances",
       sourceType: "pdf",
-      filename: file.name,
+      filename,
       fileHash,
       status: "review",
       statsJson: JSON.stringify({
         priorWarning,
         accountAssignment: assignment,
         extractionProblems: extraction.problems,
+        extractionBlocked: extraction.blocked,
+        // Kept rather than used and dropped: this is what lets a hand
+        // correction teach the account its number (`reassignBatch`), and what
+        // a "create the account from this statement" offer is filled in from.
+        identity: {
+          accountLastFour: extraction.accountLastFour,
+          institutionName: extraction.institutionName,
+          accountName: extraction.accountName,
+        },
         statementPeriod:
           extraction.statementStart && extraction.statementEnd
             ? { start: extraction.statementStart, end: extraction.statementEnd }
@@ -146,14 +317,15 @@ export async function intakeStatement(input: {
     }
 
     return {
-      filename: file.name,
+      filename,
       batchId: batch.id,
       outcome: "review",
       accountId: account.id,
       accountAssignment: assignment,
+      blocked: extraction.blocked,
     };
   } catch (err) {
-    return intakeError(file.name, err);
+    return intakeError(filename, err);
   }
 }
 
@@ -309,11 +481,47 @@ export async function reassignBatch(batchId: number, accountId: number) {
   if (!batch) return;
   const stats = batch.statsJson ? JSON.parse(batch.statsJson) : {};
   delete stats.overlaps;
+  const remembered = await rememberLastFour(accountId, stats?.identity?.accountLastFour);
   await db
     .update(schema.importBatches)
     .set({
-      statsJson: JSON.stringify({ ...stats, accountAssignment: "Chosen by hand" }),
+      statsJson: JSON.stringify({
+        ...stats,
+        accountAssignment: remembered
+          ? `Chosen by hand — remembered ··${remembered} for this account`
+          : "Chosen by hand",
+      }),
     })
     .where(eq(schema.importBatches.id, batchId));
   await addOverlapWarning(batchId, accountId);
+}
+
+/**
+ * Teach an account the number printed on a statement the user has just pointed
+ * at it. The strongest branch of `matchAccountByHint` tests the last four, so
+ * an account without one can never match it — which is why the guess had to be
+ * corrected by hand in the first place, and why every later statement from the
+ * same bank would need correcting too.
+ *
+ * Only fills a blank. An account that already carries a number is not
+ * overwritten on the strength of one file: a shared statement, or a card
+ * reissued under a new number, would otherwise rewrite the account's identity
+ * and orphan the matching of everything imported before it.
+ *
+ * Returns the number it stored, or null if it changed nothing.
+ */
+async function rememberLastFour(
+  accountId: number,
+  lastFour: unknown,
+): Promise<string | null> {
+  if (typeof lastFour !== "string" || !/^\d{4}$/.test(lastFour)) return null;
+  const account = await db.query.accounts.findFirst({
+    where: eq(schema.accounts.id, accountId),
+  });
+  if (!account || account.lastFour) return null;
+  await db
+    .update(schema.accounts)
+    .set({ lastFour })
+    .where(eq(schema.accounts.id, accountId));
+  return lastFour;
 }

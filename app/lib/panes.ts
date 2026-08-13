@@ -40,6 +40,8 @@ export function paneFromSearch(search: string | URLSearchParams): PaneId | null 
 export interface PaneActionResult {
   ok?: string;
   error?: string;
+  /** Set by `intent=create` — the account that was just made. */
+  accountId?: number;
 }
 
 type PartialLocation = { pathname: string; search: string };

@@ -92,8 +92,9 @@ export function ErrorBoundary() {
 const TOOLBAR = [
   { to: "/", icon: "🗺️", label: "Dashboard", end: true, title: "Dashboard (accounting workflow overview)" },
   { to: "/transactions", icon: "📒", label: "Transactions", title: "Transactions (the household register)" },
-  { to: "/import", icon: "📥", label: "Transaction Import", title: "Transaction import (CSV exports into the register)" },
+  { to: "/import", icon: "📥", label: "Transaction Import", end: true, title: "Transaction import (CSV exports into the register)" },
   { to: "/reconcile", icon: "⚖️", label: "Monthly Reconcile", title: "Monthly reconcile (close the books against PDF statements)" },
+  { to: "/import/bulk", icon: "📚", label: "Bulk Statements", title: "Bulk statement import — beta (a whole folder of PDF statements, unattended)" },
   { to: "/balances", icon: "🏦", label: "Account Balances", title: "Account balances (known balances and reconciliation)" },
   { to: "/categories", icon: "🏷️", label: "Categories", title: "Categories (spending classes and category list)" },
   { to: "/transfers", icon: "⛴️", label: "Transfers", title: "Transfers (money moved between your own accounts)" },
@@ -131,6 +132,7 @@ function buildMenus({
       items: [
         { kind: "link", label: "Import Transactions…", to: "/import" },
         { kind: "link", label: "Reconcile a Month…", to: "/reconcile" },
+        { kind: "link", label: "Bulk Import Statements… (beta)", to: "/import/bulk" },
         { kind: "link", label: "Backups & Restore…", to: "/backups" },
         { kind: "separator" },
         desktopOnly("Close Window", desktop.close),
@@ -162,6 +164,7 @@ function buildMenus({
       label: "Tools",
       items: [
         { kind: "link", label: "Transaction Import", to: "/import" },
+        { kind: "link", label: "Bulk Statement Import (beta)", to: "/import/bulk" },
         { kind: "link", label: "Transfer Detection", to: "/transfers" },
         { kind: "link", label: "Amazon Matching", to: "/amazon" },
         { kind: "separator" },

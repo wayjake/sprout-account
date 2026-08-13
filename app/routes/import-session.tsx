@@ -34,8 +34,9 @@ export async function loader({ params }: Route.LoaderArgs) {
   });
   if (!session) throw data("Import not found", { status: 404 });
   // A month-end close is reviewed on its own screen, which is the only one that
-  // knows what to do with a matched statement line.
+  // knows what to do with a matched statement line; a bulk run has a live one.
   if (session.purpose === "reconcile") throw redirect(`/reconcile/${sessionId}`);
+  if (session.purpose === "bulk") throw redirect(`/import/bulk/${sessionId}`);
 
   const batches = await db
     .select()

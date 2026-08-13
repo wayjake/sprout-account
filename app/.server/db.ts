@@ -14,6 +14,9 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const syncUrl = process.env.TURSO_DB_URL;
 const authToken = process.env.TURSO_DB_KEY;
 
+/** Whether the local file is managed as a replica of a Turso primary. */
+export const isEmbeddedReplica = Boolean(syncUrl);
+
 const client: Client = createClient({
   url: `file:${dbPath}`,
   ...(syncUrl ? { syncUrl, authToken } : {}),

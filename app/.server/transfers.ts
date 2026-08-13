@@ -1,7 +1,7 @@
 import { and, desc, eq, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { db, schema } from "~/.server/db";
-import { paymentCategoryName } from "~/lib/accounts";
+import { matchAccountByHint, paymentCategoryName } from "~/lib/accounts";
 
 /** Max calendar days between the two legs of a transfer. */
 export const TRANSFER_WINDOW_DAYS = 5;
@@ -215,7 +215,7 @@ export async function linkTransferPair(
 export interface TransferTargetAccount {
   id: number;
   name: string;
-  institution: string | null;
+  institution: string;
   accountType: schema.Account["accountType"];
 }
 
@@ -338,7 +338,7 @@ export async function manualPeerCandidates(
 export async function linkTransferToAccount(
   txnId: number,
   accountId: number,
-  source: "user" | "auto",
+  source: "user" | "auto" | "ai",
 ): Promise<string | null> {
   const txn = await db.query.transactions.findFirst({
     where: eq(schema.transactions.id, txnId),
@@ -456,6 +456,162 @@ export async function autoLinkTransfers(): Promise<number> {
     if (!err) linked++;
   }
   return linked;
+}
+
+export interface AccountLinkCandidate extends TransferLeg {
+  merchant: string;
+  targetAccountId: number;
+  targetAccountName: string;
+  /** Why this account, in the user's words. */
+  reason: string;
+  /** Clears the bar to be linked without being asked — see below. */
+  confident: boolean;
+}
+
+/**
+ * Legs that look like they belong to a balance-only account.
+ *
+ * A pair link needs two rows; this needs only one, because the far side keeps
+ * no ledger — a 401k deferral, a brokerage contribution, a mortgage payment.
+ * `rawCandidatePairs` can never find these (it joins transactions to
+ * transactions), so without this they stay hand-made forever.
+ *
+ * Two ways to be confident enough to link unasked:
+ *
+ *   - **The description names the account** by its last four or its name, *and*
+ *     reads like movement rather than a purchase. The institution branch of
+ *     `matchAccountByHint` deliberately does not qualify: "FIDELITY" appears on
+ *     a brokerage *fee* as readily as on a contribution, and a wrong link is
+ *     worse than none — it drops the row out of income/spend reporting and
+ *     `reconcileAccounts` folds it into the target's contributions, which is
+ *     what separates market movement from money put in.
+ *   - **History already answered.** Every earlier row in this same account with
+ *     this same merchant points at one target account. No memory table for
+ *     this: the mapping is already in `transactions`, and a query cannot fall
+ *     out of step with the rows the way a second store would.
+ *
+ * Everything else comes back `confident: false` and is offered as a suggestion.
+ */
+export async function accountLinkCandidates(
+  ids?: number[],
+): Promise<AccountLinkCandidate[]> {
+  const targets = await balanceTransferTargets();
+  if (targets.length === 0) return [];
+
+  const scope = ids
+    ? sql`and t.id in (${sql.join(ids.map((i) => sql`${i}`), sql`, `)})`
+    : sql``;
+
+  // The same bar `rawCandidatePairs` sets, minus the pairing join: unlinked,
+  // and either unfiled or already filed as a transfer that never found its
+  // other half.
+  const rows = await db.all<{
+    id: number;
+    date: string;
+    amount_cents: number;
+    description: string;
+    merchant: string;
+    account_id: number;
+    account_name: string;
+  }>(sql`
+    select t.id, t.date, t.amount_cents, t.description, t.merchant,
+           t.account_id, a.name as account_name
+    from transactions t
+    join accounts a on a.id = t.account_id
+    where t.transfer_peer_id is null
+      and t.transfer_account_id is null
+      and t.amount_cents != 0
+      and (
+        t.category_id is null
+        or t.category_id in (select id from categories where spending_class = 'transfer')
+      )
+      ${scope}
+    order by t.date desc, t.id desc
+  `);
+  if (rows.length === 0) return [];
+
+  // What the same merchant in the same account has been pointed at before.
+  const priors = await db.all<{
+    account_id: number;
+    merchant: string;
+    target: number;
+  }>(sql`
+    select distinct t.account_id, t.merchant, t.transfer_account_id as target
+    from transactions t
+    where t.transfer_account_id is not null and t.merchant != ''
+  `);
+  const learned = new Map<string, number | null>();
+  for (const p of priors) {
+    const key = `${p.account_id}|${p.merchant}`;
+    // A merchant that has pointed at two different accounts has not answered
+    // anything — null parks the key as ambiguous rather than letting the last
+    // row seen win.
+    learned.set(key, learned.has(key) ? null : p.target);
+  }
+
+  const byId = new Map(targets.map((t) => [t.id, t]));
+  const out: AccountLinkCandidate[] = [];
+  for (const r of rows) {
+    const leg = {
+      id: r.id,
+      date: r.date,
+      amountCents: r.amount_cents,
+      description: r.description,
+      merchant: r.merchant,
+      accountId: r.account_id,
+      accountName: r.account_name,
+    };
+
+    const remembered = learned.get(`${r.account_id}|${r.merchant}`);
+    if (remembered != null && byId.has(remembered)) {
+      const target = byId.get(remembered)!;
+      out.push({
+        ...leg,
+        targetAccountId: target.id,
+        targetAccountName: target.name,
+        reason: `${r.merchant} in this account has gone to ${target.name} before`,
+        confident: true,
+      });
+      continue;
+    }
+
+    const hit = matchAccountByHint(targets, r.description);
+    if (!hit) continue;
+    out.push({
+      ...leg,
+      targetAccountId: hit.account.id,
+      targetAccountName: hit.account.name,
+      reason: `Description ${hit.reason}`,
+      confident: hit.strength !== "institution" && looksLikeTransfer(r.description),
+    });
+  }
+  return out;
+}
+
+/**
+ * Point the confident legs at their account. Returns how many were linked.
+ *
+ * `ids` scopes it to a caller's own rows — the register's bulk categorize runs
+ * this per chunk, and without a scope every one of those chunks would re-sweep
+ * the whole ledger.
+ */
+export async function autoLinkAccountTransfers(ids?: number[]): Promise<number> {
+  const candidates = await accountLinkCandidates(ids);
+  let linked = 0;
+  for (const c of candidates) {
+    if (!c.confident) continue;
+    const err = await linkTransferToAccount(c.id, c.targetAccountId, "auto");
+    if (!err) linked++;
+  }
+  return linked;
+}
+
+/** The legs that looked plausible but not certain, for the Transfers screen. */
+export async function accountLinkSuggestions(
+  limit = 30,
+): Promise<AccountLinkCandidate[]> {
+  const candidates = await accountLinkCandidates();
+  return candidates.filter((c) => !c.confident).slice(0, limit);
 }
 
 /** Transfer legs (transfer-class category) whose opposite side is missing. */

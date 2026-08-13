@@ -2,8 +2,12 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "~/.server/db";
 import { chatJSON } from "~/.server/openrouter";
-import { looksLikeTransfer } from "~/.server/transfers";
-import { isLiability, paymentCategoryName } from "~/lib/accounts";
+import {
+  autoLinkAccountTransfers,
+  linkTransferToAccount,
+  looksLikeTransfer,
+} from "~/.server/transfers";
+import { ACCOUNT_TYPE_LABELS, isLiability, paymentCategoryName } from "~/lib/accounts";
 
 /**
  * How much of a description survives into the merchant key. Long enough to keep
@@ -211,6 +215,12 @@ const AssignmentsSchema = z.object({
       id: z.number(),
       /** null when no listed category fits */
       categoryId: z.number().nullable(),
+      /**
+       * The balance-only account this row's money went to or came from, when
+       * it is one of the listed ones. Null for everything else — which is
+       * almost every row.
+       */
+      transferAccountId: z.number().nullable().optional(),
       confidence: z.number(),
     }),
   ),
@@ -220,6 +230,8 @@ export interface CategorizeStats {
   fromMemory: number;
   fromAi: number;
   fromRule: number;
+  /** Legs pointed at a balance-only account, which files them as transfers. */
+  accountsLinked: number;
   blocked: number;
   lowConfidence: number;
   remaining: number;
@@ -227,14 +239,21 @@ export interface CategorizeStats {
 
 /**
  * Categorize the given transactions (or all uncategorized ones when ids is
- * null): credit-card guard first, then free merchant memory, then AI for
- * whatever is left.
+ * null): far-side account links first, then the credit-card guard, then free
+ * merchant memory, then AI for whatever is left.
  */
 export async function categorizeTransactions(
   ids: number[] | null,
   { aiLimit = 200 }: { aiLimit?: number } = {},
 ): Promise<CategorizeStats> {
   const t = schema.transactions;
+
+  // Pass 0: legs whose far side is a balance-only account. This runs ahead of
+  // everything because a link decides the category itself — filing the row
+  // from memory first would leave a mortgage payment sitting in a spending
+  // category with nothing pointing at the mortgage.
+  const accountsLinked = await autoLinkAccountTransfers(ids ?? undefined);
+
   const targets = await db
     .select({
       id: t.id,
@@ -257,6 +276,7 @@ export async function categorizeTransactions(
     fromMemory: 0,
     fromAi: 0,
     fromRule: 0,
+    accountsLinked,
     blocked: 0,
     lowConfidence: 0,
     remaining: 0,
@@ -311,11 +331,29 @@ export async function categorizeTransactions(
   // The AI cannot tell "transfer from my own savings" from "transfer from the
   // LLC I own" without knowing which accounts are actually in this ledger.
   const ownAccounts = await db
-    .select({ name: schema.accounts.name, institution: schema.accounts.institution })
+    .select({
+      id: schema.accounts.id,
+      name: schema.accounts.name,
+      institution: schema.accounts.institution,
+      accountType: schema.accounts.accountType,
+      kind: schema.accounts.kind,
+      isActive: schema.accounts.isActive,
+    })
     .from(schema.accounts);
   const ownAccountList =
     ownAccounts.map((a) => `- ${a.institution} ${a.name}`).join("\n") ||
     "- (none on file)";
+
+  // Balance-only accounts are the ones a row can name as its far side: they
+  // keep no ledger, so no opposite row will ever exist to pair with.
+  const balanceAccounts = ownAccounts.filter((a) => a.kind === "balance" && a.isActive);
+  const balanceAccountIds = new Set(balanceAccounts.map((a) => a.id));
+  const balanceAccountList = balanceAccounts
+    .map(
+      (a) =>
+        `${a.id}: ${a.institution} ${a.name} (${ACCOUNT_TYPE_LABELS[a.accountType].toLowerCase()})`,
+    )
+    .join("\n");
 
   const toAi = unresolved.slice(0, aiLimit);
   stats.remaining = unresolved.length - toAi.length;
@@ -331,7 +369,16 @@ The word "transfer" in a description does NOT by itself make something a transfe
 
 The household's own accounts:
 ${ownAccountList}
+${
+  balanceAccountList
+    ? `
+Some of those accounts are tracked by balance only and keep no transaction list of their own — a retirement plan, a brokerage, a mortgage. When a transaction is money moving into or out of one of THESE accounts specifically (a 401k deferral, a brokerage contribution or withdrawal, a mortgage or loan payment), set transferAccountId to its id below. Leave transferAccountId null in every other case, including ordinary purchases, fees charged by that institution, and movement between two accounts that both keep transaction lists.
 
+Balance-only accounts:
+${balanceAccountList}
+`
+    : ""
+}
 Categories:
 ${categoryList}`,
       user: JSON.stringify(
@@ -351,6 +398,23 @@ ${categoryList}`,
     for (const a of result.assignments) {
       const txn = byId.get(a.id);
       if (!txn) continue;
+
+      // A named far side settles the row on its own: `linkTransferToAccount`
+      // files it with the transfer category the account calls for, which is a
+      // better answer than whatever category came back beside it. Held to the
+      // same confidence floor, and to ids that are actually balance accounts.
+      if (
+        a.transferAccountId != null &&
+        balanceAccountIds.has(a.transferAccountId) &&
+        a.confidence >= AI_CONFIDENCE_THRESHOLD
+      ) {
+        const err = await linkTransferToAccount(txn.id, a.transferAccountId, "ai");
+        if (!err) {
+          stats.accountsLinked++;
+          continue;
+        }
+      }
+
       if (
         a.categoryId == null ||
         !categoryIds.has(a.categoryId) ||

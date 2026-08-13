@@ -10,6 +10,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "seed": "bun scripts/seed.ts",
+    "test:extraction": "bun scripts/test-extraction.ts",
     "desktop:build": "react-router build && bun scripts/desktop/build.ts && tauri build"
   },
   "dependencies": {
@@ -20,6 +21,7 @@
     "isbot": "^5.1.36",
     "papaparse": "^5.5.4",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router": "^8",
