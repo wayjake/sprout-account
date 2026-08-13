@@ -20,3 +20,9 @@
 
 # Local scratch/repro scripts
 /tmp-repro*.ts
+/tmp/
+
+# Extraction fixtures are real statements — real names, addresses and account
+# numbers — and this repository is public. They stay on the machine that owns
+# them; see scripts/test-extraction.ts for the names it expects.
+/scripts/fixtures/*.pdf

@@ -22,7 +22,7 @@ Use TypeScript with strict mode and ES modules. Prefer existing route/action/loa
 
 ## Testing Guidelines
 
-There is no broad unit test suite or linter. Run `npm run typecheck` before handing off code. For import or PDF extraction changes, run `npm run test:extraction`; fixtures live in `scripts/fixtures/`. Use fake seeded data for pagination, dashboard, and performance-oriented UI checks.
+There is no broad unit test suite or linter. Run `npm run typecheck` before handing off code. For import or PDF extraction changes, run `npm run test:extraction`. Its fixtures live in `scripts/fixtures/` but are gitignored and absent from a fresh clone — they are real statements holding real personal data, and this repository is public. Never commit a statement PDF. Use fake seeded data for pagination, dashboard, and performance-oriented UI checks.
 
 ## Commit & Pull Request Guidelines
 
